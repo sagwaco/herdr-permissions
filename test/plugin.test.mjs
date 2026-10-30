@@ -145,9 +145,22 @@ test('every valid score below the threshold uses the Codex decision and the same
         assert.ok(!JSON.stringify(request).includes('test-key'));
         return { approve, reason: approve ? 'reversible' : 'human-review' };
       });
-      assert.equal(calls, 1);
+      assert.equal(calls, approve ? 1 : 2);
       assert.deepEqual(result, { approve, reason: approve ? 'reversible' : 'human-review', probability, reviewer: 'codex' });
     }
+  }
+});
+
+test('a Codex decline gets one second review, and only a plain decline does', async () => {
+  const prompt = parsePrompt('codex', CODEX);
+  const answers = [{ approve: false, reason: 'human-review' }, { approve: true, reason: 'reversible' }];
+  assert.deepEqual(await classify(prompt, 'test-key', async () => response(0.5), async () => answers.shift()),
+    { approve: true, reason: 'reversible', probability: 0.5, reviewer: 'codex' });
+  for (const reason of ['codex-unavailable', 'codex-invalid-decision']) {
+    let calls = 0;
+    const result = await classify(prompt, 'test-key', async () => response(0.5), async () => { calls++; return { approve: false, reason }; });
+    assert.equal(calls, 1);
+    assert.equal(result.approve, false);
   }
 });
 

@@ -197,6 +197,9 @@ A label is not a permanent grant. It repeats one decision for one request, and
 - Jev approves requests with a valid approval probability of at least 0.80.
   Every valid score below 0.80 goes to Codex for a second review with the
   same policy. Codex must return a successful structured boolean approval.
+  Codex decisions on borderline requests vary between runs, so a plain Codex
+  rejection gets one more Codex review. Either approval approves the request
+  once. A Codex error is not reviewed again.
 - Missing credentials, network failures, malformed responses, uncertain decisions,
   hidden command text, and unknown prompt formats leave the prompt untouched.
   A TypeSafe failure does not call Codex. Codex errors or rejection leave the
