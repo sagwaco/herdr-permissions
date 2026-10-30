@@ -95,7 +95,9 @@ Keys that act on the selected row:
   for the same request, marked with `*` in the history list. The interface takes
   the same claim as an automatic review, reads the prompt inside that claim, and
   compares the agent session and full request before it sends the one-time
-  approval key. A request that already has a claim is not sent again. A human
+  approval key. A request that the automatic review left for a human can be
+  approved, because that review marks its claim as declined when it sends no
+  key. A request whose key was sent, or may have been sent, is not sent again. A human
   approval is recorded in the history with the reviewer `human`. A failed send
   is recorded as `unknown`. A pane whose dialog is not a supported permission
   prompt, or whose text is clipped, cannot be approved with `a`. Use `f` for

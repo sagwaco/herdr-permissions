@@ -54,7 +54,7 @@ export async function approveRequest({
       // A claim from an older version also blocks a human send, because that
       // attempt may already have delivered a key.
       const legacyFingerprint = createHash('sha256').update(current.identity + current.text).digest('hex');
-      if (!(await claim(fingerprint, legacyFingerprint))) return { ok: false, reason: 'already-reviewed' };
+      if (!(await claim(fingerprint, legacyFingerprint, { afterDecline: true }))) return { ok: false, reason: 'already-reviewed' };
       try { await call('agent.send_keys', { target, keys: current.prompt.keys }); }
       catch { return { ok: false, reason: 'approval-delivery-unknown' }; }
       return { ok: true, reason: 'approved-by-human' };

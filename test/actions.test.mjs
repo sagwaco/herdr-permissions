@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { approveRequest, focusRequest, loadPending } from '../actions.mjs';
 import { readHistory } from '../history.mjs';
 import { parsePrompt } from '../prompts.mjs';
-import { withLock } from '../index.mjs';
+import { review, withLock } from '../index.mjs';
 
 const CODEX = `Would you like to run the following command?
 
@@ -184,4 +184,64 @@ test('focus requests target the recorded pane and report failure safely', async 
   assert.deepEqual(state.focuses, ['w1:p1']);
   const failing = async () => { throw new Error('private failure'); };
   assert.deepEqual(await focusRequest(failing, 'w1:p1'), { ok: false, reason: 'focus-unavailable' });
+});
+
+// Run one automatic review with the real lock and claim files.
+async function autoReview(dir, call, decision) {
+  const { agent } = await call('agent.get', { target: 'w1:p1' });
+  return withLock(dir, '/socket', `w1:p1:${agent.terminal_id}:${agent.state_change_seq}`, (claim, release, decline) => review('w1:p1', {
+    call, claim, release, decline, getKey: () => 'key', decide: async () => decision,
+  }));
+}
+
+test('a user can approve a request that the automatic review left for a human', async (t) => {
+  const dir = await stateDir(t);
+  const { state, call } = harness();
+  assert.equal((await autoReview(dir, call, { approve: false, reason: 'human-review', reviewer: 'codex' })).reason, 'human-review');
+  assert.deepEqual(state.keys, []);
+  // The automatic review does not decide the same request twice.
+  assert.equal((await autoReview(dir, call, { approve: true, reason: 'reversible' })).reason, 'already-reviewed');
+  assert.deepEqual(state.keys, []);
+  assert.deepEqual(await approveRequest({ call, stateDir: dir, socketPath: '/socket', target: 'w1:p1' }), { ok: true, reason: 'approved-by-human' });
+  assert.deepEqual(state.keys, [{ target: 'w1:p1', keys: ['y'] }]);
+  assert.equal((await approveRequest({ call, stateDir: dir, socketPath: '/socket', target: 'w1:p1' })).reason, 'already-reviewed');
+  assert.equal((await autoReview(dir, call, { approve: true, reason: 'reversible' })).reason, 'already-reviewed');
+  assert.equal(state.keys.length, 1);
+});
+
+test('a user cannot approve a request after the automatic review sent its key', async (t) => {
+  const dir = await stateDir(t);
+  const { state, call } = harness();
+  const enabled = async (method, params) => method === 'plugin.list'
+    ? { plugins: [{ plugin_id: 'sang.permissions', enabled: true }] } : call(method, params);
+  assert.equal((await autoReview(dir, enabled, { approve: true, reason: 'reversible' })).reason, 'approved-once');
+  assert.equal((await approveRequest({ call, stateDir: dir, socketPath: '/socket', target: 'w1:p1' })).reason, 'already-reviewed');
+  assert.equal(state.keys.length, 1);
+});
+
+test('a user can approve a request after the automatic review failed before a send', async (t) => {
+  const dir = await stateDir(t);
+  const { state, call } = harness();
+  const { agent } = await call('agent.get', { target: 'w1:p1' });
+  await assert.rejects(withLock(dir, '/socket', `w1:p1:${agent.terminal_id}:${agent.state_change_seq}`, (claim, release, decline) => review('w1:p1', {
+    call, claim, release, decline, getKey: () => { throw new Error('keychain-unavailable'); }, decide: async () => assert.fail('no key'),
+  })), /keychain-unavailable/);
+  assert.deepEqual(await approveRequest({ call, stateDir: dir, socketPath: '/socket', target: 'w1:p1' }), { ok: true, reason: 'approved-by-human' });
+  assert.equal(state.keys.length, 1);
+});
+
+test('an uncertain automatic delivery blocks later automatic and human sends', async (t) => {
+  const dir = await stateDir(t);
+  const { state, call } = harness();
+  const failing = async (method, params) => {
+    if (method === 'plugin.list') return { plugins: [{ plugin_id: 'sang.permissions', enabled: true }] };
+    // The key arrives, but the reply is lost.
+    if (method === 'agent.send_keys') { state.keys.push(params); throw new Error('socket closed'); }
+    return call(method, params);
+  };
+  await assert.rejects(autoReview(dir, failing, { approve: true, reason: 'reversible' }), /approval-delivery-unknown/);
+  assert.equal(state.keys.length, 1);
+  assert.equal((await autoReview(dir, failing, { approve: true, reason: 'reversible' })).reason, 'already-reviewed');
+  assert.equal((await approveRequest({ call, stateDir: dir, socketPath: '/socket', target: 'w1:p1' })).reason, 'already-reviewed');
+  assert.equal(state.keys.length, 1);
 });

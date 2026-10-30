@@ -85,7 +85,7 @@ export async function snapshot(call, target, attempts = 5) {
   return { identity: identity(after), agent: after, text: read.text, prompt, cwd: after.foreground_cwd ?? after.cwd };
 }
 
-export async function review(target, { call, getKey = readKeychain, decide = classify, claim, release, expectedIdentity, precedent, record = async () => {} }) {
+export async function review(target, { call, getKey = readKeychain, decide = classify, claim, release, decline = async () => {}, expectedIdentity, precedent, record = async () => {} }) {
   const initial = await snapshot(call, target);
   if (initial.reason) return { reason: 'unrecognized-or-changed-prompt', detail: initial.reason };
   if (expectedIdentity !== undefined && initial.identity !== expectedIdentity) return { reason: 'agent-transitioned' };
@@ -98,12 +98,21 @@ export async function review(target, { call, getKey = readKeychain, decide = cla
     try { await record({ ...entry, ...result }); }
     catch { console.error(JSON.stringify({ pane: target, reason: 'history-unavailable' })); }
   };
+  // Only approved-once and approval-delivery-unknown follow a send attempt.
+  // Every other outcome sent no key, so a human can still approve the request.
+  const markDeclined = async () => {
+    try { await decline(fingerprint); }
+    catch { console.error(JSON.stringify({ pane: target, reason: 'claim-decline-unavailable' })); }
+  };
   let result;
   try { result = await decideAndSend(target, initial, { call, getKey, decide, precedent, release: () => release(fingerprint) }); }
   catch (error) {
-    await save({ reviewer: 'unknown', reason: error.message === 'approval-delivery-unknown' ? error.message : 'unavailable-human-review' });
+    const sent = error.message === 'approval-delivery-unknown';
+    if (!sent) await markDeclined();
+    await save({ reviewer: 'unknown', reason: sent ? error.message : 'unavailable-human-review' });
     throw error;
   }
+  if (result.reason !== 'approved-once') await markDeclined();
   await save(result);
   return result;
 }
@@ -162,6 +171,8 @@ export function eventTarget(raw) {
   return null;
 }
 
+const DECLINED = 'declined:';
+
 export async function withLock(stateDir, socketPath, target, task) {
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   const name = createHash('sha256').update(socketPath + ':' + target).digest('hex');
@@ -174,28 +185,36 @@ export async function withLock(stateDir, socketPath, target, task) {
   }
   try {
     const claimedPath = join(stateDir, name + '.json');
-    return await task(async (fingerprint, legacyFingerprint) => {
-      let previous;
-      try {
-        previous = await readFile(claimedPath, 'utf8');
-        if (previous === fingerprint) return false;
-      }
-      catch (error) { if (error.code !== 'ENOENT') throw error; }
-      // Replace atomically so migration cannot erase an existing send marker.
+    // Replace atomically so migration cannot erase an existing send marker.
+    const write = async (content) => {
       const temporary = claimedPath + '.' + randomUUID() + '.tmp';
       try {
         const file = await open(temporary, 'wx', 0o600);
-        try { await file.writeFile(fingerprint); await file.sync(); }
+        try { await file.writeFile(content); await file.sync(); }
         finally { await file.close(); }
         await rename(temporary, claimedPath);
       } finally {
         try { await unlink(temporary); }
         catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
+    };
+    const read = async () => {
+      try { return await readFile(claimedPath, 'utf8'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    };
+    // A declined claim records that the review sent no key. Only a human
+    // approval (afterDecline) can claim the same request again.
+    return await task(async (fingerprint, legacyFingerprint, { afterDecline = false } = {}) => {
+      const previous = await read();
+      if (previous === fingerprint) return false;
+      if (previous === DECLINED + fingerprint && !afterDecline) return false;
+      await write(fingerprint);
       return legacyFingerprint === undefined || previous !== legacyFingerprint;
     }, async (fingerprint) => {
       try { if ((await readFile(claimedPath, 'utf8')) === fingerprint) await unlink(claimedPath); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }, async (fingerprint) => {
+      if ((await read()) === fingerprint) await write(DECLINED + fingerprint);
     });
   } finally {
     await lock.close();
@@ -230,11 +249,11 @@ export async function main(mode, env = process.env) {
       const agent = (await call('agent.get', { target })).agent;
       if (agent?.agent_status !== 'blocked') continue;
       const requestKey = `${target}:${agent.terminal_id}:${agent.state_change_seq}`;
-      await withLock(env.HERDR_PLUGIN_STATE_DIR, env.HERDR_SOCKET_PATH, requestKey, async (claim, release) => {
+      await withLock(env.HERDR_PLUGIN_STATE_DIR, env.HERDR_SOCKET_PATH, requestKey, async (claim, release, decline) => {
         // Allow the permission dialog to finish drawing after the status event.
         await sleep(350);
         return drain(target, {
-          call, claim, release, expectedIdentity: identity(agent), precedent,
+          call, claim, release, decline, expectedIdentity: identity(agent), precedent,
           record: (entry) => recordHistory(env.HERDR_PLUGIN_STATE_DIR, entry),
         }, {
           report: (result) => console.log(JSON.stringify({ pane: target, ...result })),
