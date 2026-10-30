@@ -29,3 +29,13 @@ test('policy allows a reviewed artifact install to a mounted device with a verif
   assert.match(QUESTIONS.approve.criteria.true, /backup of the destination exists/);
   assert.match(QUESTIONS.approve.criteria.true, /verifies the copied bytes/);
 });
+
+test('policy allows project checks in a disposable container and scratch scripts, but not risky containers', () => {
+  assert.match(QUESTIONS.approve.criteria.true, /docker run --rm with a local or project image/);
+  assert.match(QUESTIONS.approve.criteria.true, /scratch script or data file in a temporary directory/);
+  assert.match(QUESTIONS.approve.criteria.true, /review sandbox, workspace root, and file permissions do not describe the request/);
+  assert.match(QUESTIONS.approve.criteria.false, /--privileged/);
+  assert.match(QUESTIONS.approve.criteria.false, /mounting the Docker socket/);
+  assert.match(QUESTIONS.approve.criteria.false, /--network=host/);
+  assert.match(QUESTIONS.approve.criteria.true, /newline that separates shell commands/);
+});

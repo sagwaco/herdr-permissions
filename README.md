@@ -170,7 +170,12 @@ A label is not a permanent grant. It repeats one decision for one request, and
   distribution directory or a mounted removable device when the command asserts
   a backup and verifies the copied bytes, new Git worktrees on new local branches, read-only
   commands such as `tail`, `ps`, `rg`, and `gh pr view`, and local test or program
-  runs such as `cargo test` and `cargo run`, also with GPU access. Dry runs, such
+  runs such as `cargo test` and `cargo run`, also with GPU access. The same
+  checks can pass in a disposable `docker run --rm` container with a local or
+  project image and bind mounts of the project or a temporary directory. Scratch
+  scripts that the agent writes to a temporary directory and then runs can pass.
+  Containers with `--privileged`, host namespaces, the Docker socket, home or
+  system mounts, or an unfamiliar remote image stay manual. Dry runs, such
   as `--dry-run`, `git clean -n`, and `rsync -n`, can pass when every other command
   in the request is also safe. The local push and publish rules still apply to
   dry runs.
