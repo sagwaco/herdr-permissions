@@ -1,0 +1,34 @@
+id = "sang.permissions"
+name = "Permission Approver"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "Use TypeSafe AI to approve reversible agent requests, review them in a pane, and leave irreversible actions for a human"
+platforms = ["macos"]
+
+[[actions]]
+id = "history"
+title = "Permissions: approver pane"
+contexts = ["global"]
+command = ["node", "open.mjs"]
+
+[[panes]]
+id = "history"
+title = "Permission approver"
+placement = "split"
+command = ["node", "history-ui.mjs"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["node", "index.mjs", "event"]
+
+[[actions]]
+id = "review-pending"
+title = "Permissions: review pending requests"
+contexts = ["global"]
+command = ["node", "index.mjs", "scan"]
+
+[[actions]]
+id = "check"
+title = "Permissions: check connection"
+contexts = ["global"]
+command = ["node", "index.mjs", "check"]

@@ -1,0 +1,13 @@
+{
+  "name": "herdr-permissions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check index.mjs && node --check policy.mjs && node --check prompts.mjs && node --check codex.mjs && node --check history.mjs && node --check feedback.mjs && node --check actions.mjs && node --check history-ui.mjs && node --check panes.mjs && node --check open.mjs"
+  }
+}
