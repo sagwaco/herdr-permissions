@@ -100,8 +100,8 @@ Keys that act on the selected row:
   key. A request whose key was sent, or may have been sent, is not sent again. A human
   approval is recorded in the history with the reviewer `human`. A failed send
   is recorded as `unknown`. A pane whose dialog is not a supported permission
-  prompt, or whose text is clipped, cannot be approved with `a`. Use `f` for
-  that pane.
+  prompt, or whose clipped preview cannot be expanded safely, cannot be approved
+  with `a`. Use `f` for that pane.
 - `f` moves focus to the pane that owns the request. An agent keeps its prompt,
   so you can answer it yourself. In a split or tab pane the interface stays open
   for your return. A popup, if you open one with `--placement popup`, closes. If
@@ -224,12 +224,16 @@ apply.
 
 Claude Code: command and file permission dialogs with the first `Yes` row selected.
 Codex: command and edit dialogs with the first one-time approval row selected and
-its letter shortcut visible. These layouts were checked against Claude Code
+its letter shortcut visible. A long Codex command preview that ends with the
+`view all` hint is expanded through Codex's pager, read page by page, and closed
+again before review. The expansion is used only when the restored dialog matches
+the original clipped screen. These layouts were checked against Claude Code
 2.1.296 and Codex 0.162.1. Custom layouts can require an adapter update.
 
-Questions, repository trust, screen-reader input menus, clipped previews, and
-unsupported agents remain manual. OpenCode remains manual because its selection
-uses color and its terminal dialog has no direct one-time approval shortcut.
+Questions, repository trust, screen-reader input menus, clipped previews that
+cannot be restored, and unsupported agents remain manual. OpenCode remains manual
+because its selection uses color and its terminal dialog has no direct one-time
+approval shortcut.
 
 Each hook checks the agent identity, session, state, revision, and full prompt again
 before it sends one key. It compares the `agent.get` revision before and after each
@@ -279,7 +283,7 @@ Tests use synthetic permission dialogs, mock TypeSafe and Pi responses, and a
 local mock Herdr socket. They do not send input to live agents. They cover policy
 failures, Pi routing and responses, hidden content, secrets, duplicate events,
 conversation redraws, safe retries, claim migration, queued dialogs, agent changes,
-and an uncertain send result.
+Codex pager expansion, and an uncertain send result.
 History tests cover private file modes, concurrent writes, credential hiding,
 ordering, damaged records, bounded reads, and failures after a request is claimed.
 Interface tests cover both lists, labels, row marks, approval and focus keys,

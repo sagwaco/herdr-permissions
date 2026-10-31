@@ -3,6 +3,33 @@ import { stripVTControlCharacters } from 'node:util';
 const HIDDEN = /(?:\u2026|^\s*\.{3}\s*$|[↑↓]\d+|\bview all\b|\bsee (?:more|the first lines)\b|\b\d+ lines? (?:above|hidden|omitted)\b|\+\d+ lines?\b|cannot be shown|too large to (?:show|preview)|not previewed|could not be checked)/im;
 const CLAUDE_HEADER = /^(?:Bash command(?: \([^\n]+\))?|Read file|Edit file|Overwrite file|Create file|Write file|Edit notebook)(?: · from (?:the .+ (?:agent|plugin)|a subagent|the ".+" workflow|a remote cloud agent))?$/;
 const CODEX_HEADER = /^(?:Would you like to run the following command\?|Would you like to make the following edits\?)$/;
+const CODEX_CLIPPED = /^\s*\[\u2026 \d+ lines\] (?:\u2303a|Ctrl\+a) view all$/im;
+
+export function codexPreviewClipped(source) {
+  return typeof source === 'string' && CODEX_CLIPPED.test(stripVTControlCharacters(source));
+}
+
+// Codex clips long command previews. The expanded pager contains the command
+// without the dialog gutter or the `$ ` prompt, so put the full command back
+// into the original dialog before parsing it.
+export function expandCodexPreview(source, commandLines) {
+  if (!Array.isArray(commandLines) || commandLines.length === 0) return null;
+  const text = stripVTControlCharacters(source).replaceAll('\r\n', '\n');
+  const rawLines = text.split('\n');
+  const marker = rawLines.findIndex((line) => CODEX_CLIPPED.test(line));
+  if (marker < 0) return null;
+  const dollar = rawLines.slice(0, marker).findLastIndex((line) => /^\s*\$\s+\S/.test(line));
+  if (dollar < 0) return null;
+  const gutter = rawLines[dollar].match(/^\s*/)[0];
+  const command = commandLines[0].startsWith('$ ') ? commandLines : ['$ ' + commandLines[0], ...commandLines.slice(1)];
+  const expanded = [
+    ...rawLines.slice(0, dollar),
+    ...command.map((line) => gutter + line),
+    ...rawLines.slice(marker + 1),
+  ].join('\n');
+  const prompt = parsePrompt('codex', expanded);
+  return prompt ? { prompt, text: expanded } : null;
+}
 
 export function parsePrompt(agent, source) {
   if (!['claude', 'codex'].includes(agent) || typeof source !== 'string' || source.length > 24_000) return null;

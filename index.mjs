@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { classify, localReason } from './policy.mjs';
-import { parsePrompt } from './prompts.mjs';
+import { codexPreviewClipped, expandCodexPreview, parsePrompt } from './prompts.mjs';
 import { recordHistory } from './history.mjs';
 import { labelFor, labelIndex, precedentDecision, readFeedback } from './feedback.mjs';
 
@@ -60,29 +60,126 @@ function identity(agent) {
   ]);
 }
 
+async function readPane(call, target) {
+  const read = (await call('agent.read', {
+    target, source: 'detection', strip_ansi: true, format: 'text',
+  })).read;
+  if (!read || typeof read.truncated !== 'boolean' || read.pane_id !== target || read.source !== 'detection' || !Number.isSafeInteger(read.revision)) {
+    return null;
+  }
+  return read;
+}
+
+const PAGER_STATUS = /^─+ (\d+)% ─$/;
+// The history pane polls pending requests. Reuse a successful expansion until
+// the agent redraws, so an unresolved long prompt does not keep paging the UI.
+const previewCache = new WeakMap();
+
+function pagerPage(text) {
+  const lines = text.split('\n');
+  if (!/^\/ .*\/ /.test(lines[0])) return null;
+  // The last status line is the pager footer; earlier matches can be command text.
+  const status = lines.findLastIndex((line) => PAGER_STATUS.test(line));
+  if (status < 1) return null;
+  return { lines: lines.slice(1, status), percent: Number(PAGER_STATUS.exec(lines[status])[1]) };
+}
+
+function mergePagerPages(pages) {
+  let lines = pages[0].lines;
+  for (const page of pages.slice(1)) {
+    let overlap = Math.min(lines.length, page.lines.length);
+    while (overlap > 0 && !lines.slice(-overlap).every((line, i) => line === page.lines[i])) overlap--;
+    if (overlap === 0) return null;
+    lines = lines.concat(page.lines.slice(overlap));
+  }
+  return lines;
+}
+
+// Long Codex command previews open a pager with ctrl+a. Read every page,
+// restore the dialog, and only accept the expansion when the dialog is unchanged.
+async function readCodexPreview(call, target, original) {
+  let opened = false;
+  let closed = false;
+  let result = null;
+  try {
+    await call('agent.send_keys', { target, keys: ['ctrl+a'] });
+    opened = true;
+    const pages = [];
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await sleep(120);
+      const read = await readPane(call, target);
+      if (!read || read.truncated) break;
+      const page = pagerPage(read.text);
+      if (!page) break;
+      pages.push(page);
+      if (page.percent === 100) break;
+      await call('agent.send_keys', { target, keys: ['ctrl+f'] });
+    }
+    if (pages.at(-1)?.percent !== 100) throw new Error('preview-incomplete');
+    const command = mergePagerPages(pages);
+    if (!command) throw new Error('preview-discontinuous');
+    result = expandCodexPreview(original, command);
+  } catch { result = null; }
+  finally {
+    if (opened) {
+      try { await call('agent.send_keys', { target, keys: ['q'] }); closed = true; }
+      catch { /* A failed close keeps the request manual. */ }
+    }
+  }
+  if (!result || !closed) return null;
+  try {
+    await sleep(120);
+    const restored = await readPane(call, target);
+    if (!restored || restored.truncated || restored.text !== original) return null;
+  } catch { return null; }
+  return result;
+}
+
 export async function snapshot(call, target, attempts = 5) {
   const before = (await call('agent.get', { target })).agent;
   if (before?.agent_status !== 'blocked' || before.pane_id !== target) return { reason: 'agent-not-blocked' };
   if (!before.terminal_id || !Number.isSafeInteger(before.state_change_seq) || !Number.isSafeInteger(before.revision)) {
     return { reason: 'invalid-agent-identity' };
   }
-  const read = (await call('agent.read', {
-    target, source: 'detection', strip_ansi: true, format: 'text',
-  })).read;
-  if (!read || typeof read.truncated !== 'boolean' || read.pane_id !== target || read.source !== 'detection' || !Number.isSafeInteger(read.revision)) {
-    return { reason: 'invalid-pane-read' };
-  }
+  const read = await readPane(call, target);
+  if (!read) return { reason: 'invalid-pane-read' };
   if (read.truncated) return { reason: 'pane-read-truncated' };
-  const prompt = parsePrompt(before.agent, read.text);
+  let prompt = parsePrompt(before.agent, read.text);
+  let text = read.text;
+  let expanded = false;
+  let cache = null;
+  let cacheKey = null;
+  let previewResult = null;
+  if (!prompt && before.agent === 'codex' && codexPreviewClipped(read.text)) {
+    cacheKey = identity(before) + '\0' + read.text;
+    cache = previewCache.get(call);
+    if (!cache) { cache = new Map(); previewCache.set(call, cache); }
+    const cached = cache.get(cacheKey);
+    let preview = cached?.revision === before.revision ? cached.preview : null;
+    if (!preview) {
+      preview = await readCodexPreview(call, target, read.text);
+      if (preview) expanded = true;
+    }
+    if (!preview) return { reason: 'prompt-format-unrecognized' };
+    previewResult = preview;
+    prompt = preview.prompt;
+    text = preview.text;
+  }
   if (!prompt) return { reason: 'prompt-format-unrecognized' };
   const after = (await call('agent.get', { target })).agent;
   if (after?.agent_status !== 'blocked' || identity(before) !== identity(after)) return { reason: 'agent-changed-during-read' };
   // Herdr 0.9.3 sets agent.read.revision to zero; compare the two agent.get counters.
   // Codex redraws often change the counter, so read again a few times before giving up.
-  if (before.revision !== after.revision) {
+  // Our own pager open/close changes the counter, and the restored dialog was
+  // already compared with the clipped screen before returning.
+  if (!expanded && before.revision !== after.revision) {
     return attempts > 1 ? snapshot(call, target, attempts - 1) : { reason: 'output-changed-during-read' };
   }
-  return { identity: identity(after), agent: after, text: read.text, prompt, cwd: after.foreground_cwd ?? after.cwd };
+  if (expanded && previewResult) {
+    if (cache.size >= 50) cache.delete(cache.keys().next().value);
+    cache.set(cacheKey, { preview: previewResult, revision: after.revision });
+  }
+  return { identity: identity(after), agent: after, text, prompt, cwd: after.foreground_cwd ?? after.cwd };
 }
 
 export async function review(target, { call, getKey = readKeychain, decide = classify, claim, release, decline = async () => {}, expectedIdentity, precedent, record = async () => {} }) {

@@ -80,6 +80,63 @@ test('truncated previews and ambiguous terminal content stay manual', () => {
   assert.equal(parsePrompt('codex', CODEX + 'x'.repeat(24_000)), null);
 });
 
+test('clipped Codex command previews are expanded before review', async () => {
+  const { state, dependencies } = harness();
+  const clipped = CODEX.replace('  $ npm test', '  $ npm test\n  [… 2 lines] ⌃a view all');
+  state.text = clipped;
+  const pager = `/ E X E C / / / / / / / / / / / / / / / / / / / / / / / /\nnpm test\necho hidden\n${'─'.repeat(20)} 100% ─\n ↑/↓ to scroll · pgup/pgdn to page · home/end to jump\n q close\n`;
+  const call = dependencies.call;
+  dependencies.call = async (method, params) => {
+    if (method === 'agent.send_keys' && params.keys[0] === 'ctrl+a') {
+      state.keys.push(params);
+      state.text = pager;
+      state.agent.revision++;
+      return { type: 'ok' };
+    }
+    if (method === 'agent.send_keys' && params.keys[0] === 'q') {
+      state.keys.push(params);
+      state.text = clipped;
+      state.agent.revision++;
+      return { type: 'ok' };
+    }
+    return call(method, params);
+  };
+  let reviewed;
+  dependencies.decide = async (prompt) => {
+    state.decisions++;
+    reviewed = prompt.text;
+    return { approve: true, reason: 'reversible' };
+  };
+  assert.equal((await review('w8:p1', dependencies)).reason, 'approved-once');
+  assert.match(reviewed, /echo hidden/);
+  assert.deepEqual(state.keys.at(-1), { target: 'w8:p1', keys: ['y'] });
+  assert.equal(state.keys.filter((entry) => entry.keys[0] === 'ctrl+a').length, 1);
+  assert.equal(state.keys.filter((entry) => entry.keys[0] === 'q').length, 1);
+});
+
+test('a Codex preview that does not open a readable pager stays manual', async () => {
+  const { state, dependencies } = harness();
+  const clipped = CODEX.replace('  $ npm test', '  $ npm test\n  [… 2 lines] ⌃a view all');
+  state.text = clipped;
+  const call = dependencies.call;
+  dependencies.call = async (method, params) => {
+    if (method === 'agent.send_keys' && params.keys[0] === 'ctrl+a') {
+      state.keys.push(params);
+      state.text = 'not a pager';
+      return { type: 'ok' };
+    }
+    if (method === 'agent.send_keys' && params.keys[0] === 'q') {
+      state.keys.push(params);
+      state.text = clipped;
+      return { type: 'ok' };
+    }
+    return call(method, params);
+  };
+  assert.deepEqual(await review('w8:p1', dependencies), { reason: 'unrecognized-or-changed-prompt', detail: 'prompt-format-unrecognized' });
+  assert.equal(state.decisions, 0);
+  assert.ok(!state.keys.some((entry) => entry.keys.includes('y')));
+});
+
 test('sensitive values never reach either model, including JSON keys', async () => {
   let calls = 0;
   for (const text of [
