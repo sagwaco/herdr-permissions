@@ -8,6 +8,24 @@ import { clearPane, savePane } from './panes.mjs';
 
 const LABEL_MARKS = { approve: '+', manual: '-' };
 
+// ANSI color helpers for TTY screen output.
+const RESET = '\x1b[0m';
+const BOLD = '\x1b[1m';
+const DIM = '\x1b[2m';
+const RED = '\x1b[31m';
+const GREEN = '\x1b[32m';
+const YELLOW = '\x1b[33m';
+const CYAN = '\x1b[36m';
+const GRAY = '\x1b[90m';
+function c(text, code) { return `${code}${text}${RESET}`; }
+function bold(text) { return c(text, BOLD); }
+function dim(text) { return c(text, DIM); }
+function red(text) { return c(text, RED); }
+function green(text) { return c(text, GREEN); }
+function yellow(text) { return c(text, YELLOW); }
+function cyan(text) { return c(text, CYAN); }
+function gray(text) { return c(text, GRAY); }
+
 export function sanitize(value) {
   return stripVTControlCharacters(String(value ?? ''))
     .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ');
@@ -19,10 +37,27 @@ const cellWidth = (character) => character.codePointAt(0) > 0x7e ? 2 : 1;
 export function clip(value, width) {
   let result = '';
   let used = 0;
-  for (const character of sanitize(value)) {
-    if (used + cellWidth(character) > width) break;
+  let inEscape = false;
+  for (const character of String(value ?? '')) {
+    if (inEscape) {
+      result += character;
+      if ((character >= '@' && character <= '~') || (character >= ' ' && character <= '/')) inEscape = false;
+      continue;
+    }
+    if (character === '\x1b') {
+      inEscape = true;
+      result += character;
+      continue;
+    }
+    const clean = character.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ');
+    if (clean !== character) {
+      result += clean;
+      continue;
+    }
+    const cells = cellWidth(character);
+    if (used + cells > width) break;
     result += character;
-    used += cellWidth(character);
+    used += cells;
   }
   return result;
 }
@@ -53,7 +88,7 @@ export function labelText(label) {
   return FEEDBACK_LABELS[label] ?? 'none';
 }
 
-export function detailLines(entry, width) {
+export function detailLines(entry, width, color = false) {
   if (!entry) return [];
   const fields = [
     ['Time', entry.processedAt], ['Result', entry.outcome], ['Reviewer', entry.reviewer],
@@ -62,11 +97,19 @@ export function detailLines(entry, width) {
     ['Live', entry.live ? 'yes' : undefined],
     ['Pane', entry.pane], ['Agent', entry.agent], ['Directory', entry.cwd], ['ID', entry.id],
   ];
-  return [
+  const lines = [
     ...fields.filter(([, value]) => value !== undefined && value !== null)
       .map(([label, value]) => `${label}: ${value}`),
     '', 'Request:', entry.request,
   ].flatMap((line) => wrap(line, width));
+  if (!color) return lines;
+  // Color after wrapping so escape codes never count toward the line width.
+  return lines.map((line) => {
+    if (line === 'Request:') return cyan(line);
+    const split = line.indexOf(': ');
+    const paint = split < 0 ? undefined : DETAIL_COLORS[line.slice(0, split)];
+    return paint ? `${gray(`${line.slice(0, split)}:`)} ${paint(line.slice(split + 2))}` : line;
+  });
 }
 
 export function listEntries(state) {
@@ -154,21 +197,44 @@ export function requestSummary(request) {
   return lines.join(' ').replace(/\s+/gu, ' ');
 }
 
-function summary(entry) {
-  return `${sanitize(entry.processedAt).replace('T', ' ').slice(5, 19)}  ${sanitize(entry.outcome)}  ${sanitize(entry.reviewer)}  ${requestSummary(entry.request)}`;
+function outcomeColor(value) {
+  return value === 'approve' ? green(value)
+    : value === 'reject' ? red(value)
+    : value === 'manual' ? yellow(value)
+    : gray(value);
 }
 
-function mark(entry) {
-  return `${entry.live ? '*' : ' '}${LABEL_MARKS[entry.label] ?? '.'}`;
+const DETAIL_COLORS = {
+  Time: gray, Result: outcomeColor, Reviewer: yellow, 'Jev score': gray, Reason: yellow,
+  Detail: gray, Label: yellow, Live: yellow, Pane: cyan, Agent: yellow, Directory: gray, ID: gray,
+};
+
+function summary(entry, color = false) {
+  const time = sanitize(entry.processedAt).replace('T', ' ').slice(5, 19);
+  const outcome = sanitize(entry.outcome);
+  const reviewer = sanitize(entry.reviewer);
+  const req = requestSummary(entry.request);
+  if (!color) return `${time}  ${outcome}  ${reviewer}  ${req}`;
+  return `${gray(time)}  ${outcomeColor(outcome)}  ${yellow(reviewer)}  ${req}`;
 }
 
-function pendingSummary(entry) {
+function mark(entry, color = false) {
+  const live = entry.live ? (color ? yellow('*') : '*') : ' ';
+  const label = LABEL_MARKS[entry.label] ?? '.';
+  const coloredLabel = color
+    ? (label === '+' ? green(label) : label === '-' ? red(label) : gray(label))
+    : label;
+  return `${live}${coloredLabel}`;
+}
+
+function pendingSummary(entry, color = false) {
   const request = requestSummary(entry.request) || `(${sanitize(entry.reason ?? 'unknown prompt')})`;
-  return `${sanitize(entry.pane)}  ${sanitize(entry.agent)}  ${request}`;
+  if (!color) return `${sanitize(entry.pane)}  ${sanitize(entry.agent)}  ${request}`;
+  return `${cyan(sanitize(entry.pane))}  ${yellow(sanitize(entry.agent))}  ${request}`;
 }
 
-function rowText(entry, tab) {
-  return `${mark(entry)} ${tab === 'pending' ? pendingSummary(entry) : summary(entry)}`;
+function rowText(entry, tab, color = false) {
+  return `${mark(entry, color)} ${tab === 'pending' ? pendingSummary(entry, color) : summary(entry, color)}`;
 }
 
 const LIST_HELP = 'j/k Enter | a approve f focus | y should approve n no action u clear | Tab lists | r refresh q quit';
@@ -188,28 +254,30 @@ export function renderScreen(state, columns, rows) {
     entries: [], selected: 0, pendingSelected: 0, ...state, tab,
     pending: state.pending ?? [],
   };
-  const tabs = `1 Pending ${view.pending.length} | 2 History ${view.entries.length}`;
+  const pendingTab = view.tab === 'pending' ? bold(`1 Pending ${view.pending.length}`) : dim(`1 Pending ${view.pending.length}`);
+  const historyTab = view.tab === 'history' ? bold(`2 History ${view.entries.length}`) : dim(`2 History ${view.entries.length}`);
+  const tabs = `${pendingTab} | ${historyTab}`;
   const items = listEntries(view);
-  const liveness = 'live label';
+  const liveness = bold('live label');
   const lines = [tab === 'pending'
-    ? `Pending requests | Live | Time: UTC | ${tabs}`
-    : `Permission history | Latest 1000 records | Time: UTC | ${tabs}`];
+    ? `${bold('Pending requests')} | ${bold('Live')} | Time: UTC | ${tabs}`
+    : `${bold('Permission history')} | Latest 1000 records | Time: UTC | ${tabs}`];
   const selected = view[selectionField(view)];
   const position = items.length ? `${selected + 1}/${items.length}` : '0/0';
-  const head = `${position} | ${view.detail ? 'Details'
-    : tab === 'pending' ? `${liveness} | Pane  Agent  Request` : `${liveness} | Time  Result  Reviewer  Request`}`;
+  const head = `${position} | ${view.detail ? bold('Details')
+    : tab === 'pending' ? `${liveness} | ${cyan('Pane')}  ${yellow('Agent')}  Request` : `${liveness} | ${gray('Time')}  ${bold('Result')}  ${yellow('Reviewer')}  Request`}`;
   lines.push(view.error ? `Read error: ${sanitize(view.error)} | r retry`
     : view.status ? `${sanitize(view.status)} | ${head}` : head);
   if (view.detail) {
-    const details = detailLines(items[selected], width);
+    const details = detailLines(items[selected], width, true);
     const offset = Math.min(view.offset, Math.max(0, details.length - pageSize));
     lines.push(...details.slice(offset, offset + pageSize));
   } else if (!items.length) {
-    lines.push(tab === 'pending' ? 'No agent is waiting for permission.' : 'No permission history yet.');
+    lines.push(tab === 'pending' ? dim('No agent is waiting for permission.') : dim('No permission history yet.'));
   } else {
     const start = Math.floor(selected / pageSize) * pageSize;
     lines.push(...items.slice(start, start + pageSize)
-      .map((entry, index) => `${start + index === selected ? '>' : ' '} ${rowText(entry, tab)}`));
+      .map((entry, index) => `${start + index === selected ? '>' : ' '} ${rowText(entry, tab, true)}`));
   }
   while (lines.length < height - 1) lines.push('');
   lines.push(view.detail ? DETAIL_HELP : LIST_HELP);

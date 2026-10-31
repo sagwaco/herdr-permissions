@@ -12,6 +12,8 @@ import {
   navigate, requestSummary, renderPlain, renderScreen, approveMessage, main,
 } from '../history-ui.mjs';
 
+function stripAnsi(s) { return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, ''); }
+
 const entry = (id, extra = {}) => ({
   id, processedAt: '2026-10-16T18:00:00.000Z', pane: 'w1:p1', agent: 'codex', cwd: '/tmp',
   request: `request ${id}`, outcome: 'approved', reviewer: 'jev', reason: 'approved-once', ...extra,
@@ -31,9 +33,11 @@ test('every stored field is sanitized in details, list, and plain output', () =>
   const attack = '\x1b[2Junsafe\u202e\u200b\x85\u2028';
   const row = Object.fromEntries(Object.keys(entry('id', { detail: '', probability: 0 })).map((key) => [key, attack]));
   for (const output of [renderPlain([row]), renderScreen(state([row]), 80, 24), detailLines(row, 79).join('\n')]) {
-    assert.doesNotMatch(output, /[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f\p{Cf}\p{Zl}\p{Zp}]/u);
-    assert.doesNotMatch(output, /\[2J/);
+    const plain = stripAnsi(output);
+    assert.doesNotMatch(plain, /[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f\p{Cf}\p{Zl}\p{Zp}]/u);
+    assert.doesNotMatch(plain, /\[2J/);
   }
+  assert.doesNotMatch(renderPlain([row]), /[\x1b\p{Cf}]/u);
 });
 
 test('rendering keeps the newest-first order supplied by readHistory', () => {
@@ -108,6 +112,20 @@ test('empty history and read errors remain readable', () => {
   assert.match(renderScreen(state([], { error: '\x1b[2Jpermission denied' }), 80, 8), /Read error: permission denied/);
 });
 
+function displayWidth(s) {
+  let width = 0;
+  let inEscape = false;
+  for (const ch of s) {
+    if (inEscape) {
+      if ((ch >= '@' && ch <= '~') || (ch >= ' ' && ch <= '/')) inEscape = false;
+      continue;
+    }
+    if (ch === '\x1b') { inEscape = true; continue; }
+    width += ch.codePointAt(0) > 0x7e ? 2 : 1;
+  }
+  return width;
+}
+
 test('narrow and short windows never overflow, including wide characters', () => {
   const row = entry('界😀', { request: '界😀e\u0301'.repeat(20), reason: '界'.repeat(20) });
   for (const columns of [1, 2, 3, 10, 40]) {
@@ -116,8 +134,7 @@ test('narrow and short windows never overflow, including wide characters', () =>
         const lines = renderScreen(state([row], { detail }), columns, rows).split('\r\n');
         assert.ok(lines.length <= rows);
         for (const line of lines) {
-          const cells = [...line].reduce((total, character) => total + (character.codePointAt(0) > 0x7e ? 2 : 1), 0);
-          assert.ok(cells <= Math.max(1, columns - 1), `${columns} columns: ${line}`);
+          assert.ok(displayWidth(line) <= Math.max(1, columns - 1), `${columns} columns: ${line}`);
         }
       }
     }
@@ -193,7 +210,7 @@ const ready = (box) => until(() => box.text.includes('q quit'), 'the first rende
     assert.match(text, /Read error: temporary failure/);
     input.emit('keypress', 'r', { name: 'r' });
     await settle();
-    assert.match(text, /3\/3 \| Details/);
+    assert.match(stripAnsi(text), /3\/3 \| Details/);
     const previousScreen = text;
     t.mock.timers.tick(2_000);
     await settle();
@@ -253,12 +270,14 @@ test('labels and live requests are marked in both lists and in plain output', ()
   assert.equal(marked[1].label, 'manual');
   assert.equal(marked[1].live, false);
   const history = renderScreen(state(marked, { pending: [] }), 110, 10);
-  assert.match(history, /> \*\+ /);
-  assert.match(history, / .- 10-16 17:00/);
+  const plainHistory = stripAnsi(history);
+  assert.match(plainHistory, /> \*\+ /);
+  assert.match(plainHistory, / .- 10-16 17:00/);
   assert.match(renderPlain(marked), /\+ 10-16 18:00:00  approved  jev  \$ npm test/);
   const pendingScreen = renderScreen(state(marked, { tab: 'pending', pending }), 110, 10);
-  assert.match(pendingScreen, /Pending requests \| Live/);
-  assert.match(pendingScreen, /w1:p1  claude  \$ npm test/);
+  const plainPending = stripAnsi(pendingScreen);
+  assert.match(plainPending, /Pending requests \| Live/);
+  assert.match(plainPending, /w1:p1  claude  \$ npm test/);
 });
 
 test('each list keeps its own selection and Tab switches between them', () => {
@@ -277,7 +296,7 @@ test('each list keeps its own selection and Tab switches between them', () => {
   current = navigate(current, 'down', 5);
   assert.equal(current.pendingSelected, 1);
   current = navigate(current, 'return', 5);
-  assert.match(renderScreen(current, 110, 10), /2\/2 \| Details/);
+  assert.match(stripAnsi(renderScreen(current, 110, 10)), /2\/2 \| Details/);
   current = switchTab(current);
   assert.equal(current.detail, false);
   assert.equal(current.selected, 1);
@@ -302,6 +321,10 @@ test('detail view shows the user label, liveness, missing fields, and scrolls', 
   const live = detailLines({ pane: 'w2:p4', agent: 'codex', request: '$ npm test', live: true, reason: 'pane-read-truncated' }, 80).join('\n');
   assert.match(live, /Live: yes/);
   assert.match(live, /Reason: pane-read-truncated/);
+  const colored = detailLines(row, 80, true);
+  assert.match(colored.join('\n'), /\x1b\[90mLabel:\x1b\[0m/);
+  assert.equal(colored.length, detailLines(row, 80).length);
+  assert.ok(colored.every((line) => displayWidth(line) <= 80));
   assert.equal(detailLines({ request: '$ npm test' }, 80).join('\n').includes('Time:'), false);
 });
 
@@ -330,7 +353,7 @@ test('keys approve a live request, record labels, and focus another pane', async
     await ready(box);
     assert.match(box.text, /Tab lists/);
     input.emit('keypress', '', { name: 'tab' });
-    assert.match(box.text, /Pending requests \| Live/);
+    assert.match(stripAnsi(box.text), /Pending requests \| Live/);
     input.emit('keypress', 'a', { name: 'a' });
     await until(() => /Approved once/.test(box.text), 'the approval status');
     input.emit('keypress', 'y', { name: 'y' });
