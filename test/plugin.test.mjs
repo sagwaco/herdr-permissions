@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { API_URL, classify, localReason, QUESTIONS } from '../policy.mjs';
-import { reviewWithCodex } from '../codex.mjs';
+import { reviewWithPi } from '../pi.mjs';
 import { drain, eventTarget, main, PLUGIN_ID, review, rpc, withLock } from '../index.mjs';
 import { parsePrompt } from '../prompts.mjs';
 import { readHistory, recordHistory } from '../history.mjs';
@@ -127,13 +127,13 @@ test('TypeSafe uses the fixed HTTPS endpoint and keeps the credential outside st
   assert.equal(result.approve, true);
 });
 
-test('scores at or above the threshold skip Codex', async () => {
+test('scores at or above the threshold skip Pi', async () => {
   for (const value of [0.8, 0.99, 1]) {
-    assert.equal((await classify({ text: 'npm test' }, 'test-key', async () => response(value), () => assert.fail('must not call Codex'))).approve, true);
+    assert.equal((await classify({ text: 'npm test' }, 'test-key', async () => response(value), () => assert.fail('must not call Pi'))).approve, true);
   }
 });
 
-test('every valid score below the threshold uses the Codex decision and the same policy', async () => {
+test('every valid score below the threshold uses the Pi decision and the same policy', async () => {
   const prompt = parsePrompt('codex', CODEX);
   for (const probability of [0, 0.2, 0.79, 0.799999]) {
     for (const approve of [true, false]) {
@@ -146,17 +146,17 @@ test('every valid score below the threshold uses the Codex decision and the same
         return { approve, reason: approve ? 'reversible' : 'human-review' };
       });
       assert.equal(calls, approve ? 1 : 2);
-      assert.deepEqual(result, { approve, reason: approve ? 'reversible' : 'human-review', probability, reviewer: 'codex' });
+      assert.deepEqual(result, { approve, reason: approve ? 'reversible' : 'human-review', probability, reviewer: 'pi' });
     }
   }
 });
 
-test('a Codex decline gets one second review, and only a plain decline does', async () => {
+test('a Pi decline gets one second review, and only a plain decline does', async () => {
   const prompt = parsePrompt('codex', CODEX);
   const answers = [{ approve: false, reason: 'human-review' }, { approve: true, reason: 'reversible' }];
   assert.deepEqual(await classify(prompt, 'test-key', async () => response(0.5), async () => answers.shift()),
-    { approve: true, reason: 'reversible', probability: 0.5, reviewer: 'codex' });
-  for (const reason of ['codex-unavailable', 'codex-invalid-decision']) {
+    { approve: true, reason: 'reversible', probability: 0.5, reviewer: 'pi' });
+  for (const reason of ['pi-unavailable', 'pi-invalid-decision']) {
     let calls = 0;
     const result = await classify(prompt, 'test-key', async () => response(0.5), async () => { calls++; return { approve: false, reason }; });
     assert.equal(calls, 1);
@@ -164,62 +164,53 @@ test('a Codex decline gets one second review, and only a plain decline does', as
   }
 });
 
-test('TypeSafe errors and malformed answers never invoke Codex or approve', async () => {
+test('TypeSafe errors and malformed answers never invoke Pi or approve', async () => {
   let calls = 0;
-  const noCodex = () => { calls++; return { approve: true }; };
+  const noReview = () => { calls++; return { approve: true }; };
   for (const value of [undefined, null, '1', NaN, Infinity, -1, 1.1]) {
-    assert.equal((await classify({ text: 'npm test' }, 'test-key', async () => response(value), noCodex)).approve, false);
+    assert.equal((await classify({ text: 'npm test' }, 'test-key', async () => response(value), noReview)).approve, false);
   }
   for (const fetchImpl of [
     async () => ({ ok: false, status: 429 }),
     async () => response(1, { type: 'choice' }),
     async () => { throw new Error('secret server error'); },
     async () => ({ ok: true, json: async () => { throw new Error('bad JSON'); } }),
-  ]) assert.equal((await classify({ text: 'npm test' }, 'test-key', fetchImpl, noCodex)).approve, false);
+  ]) assert.equal((await classify({ text: 'npm test' }, 'test-key', fetchImpl, noReview)).approve, false);
   assert.equal(calls, 0);
 });
 
-test('Codex failures and non-boolean approvals stay manual', async () => {
+test('Pi failures and non-boolean approvals stay manual', async () => {
   for (const reviewer of [
     async () => { throw new Error('private error'); },
     async () => null,
     async () => ({ approve: 'true', reason: 'invalid' }),
-    async () => ({ approve: false, reason: 'codex-unavailable' }),
+    async () => ({ approve: false, reason: 'pi-unavailable' }),
   ]) {
     const result = await classify({ text: 'npm test' }, 'test-key', async () => response(0.7), reviewer);
     assert.equal(result.approve, false);
-    assert.equal(result.reviewer, 'codex');
+    assert.equal(result.reviewer, 'pi');
     assert.equal(result.probability, 0.7);
   }
 });
 
-function codexResponse(approve, extra = {}) {
-  return [
-    { type: 'thread.started', thread_id: 'test-thread' }, { type: 'turn.started' },
-    { type: 'item.completed', item: { id: 'reply', type: 'agent_message', text: JSON.stringify({ approve }), ...extra } },
-    { type: 'turn.completed', usage: {} },
-  ].map((event) => JSON.stringify(event)).join('\n') + '\n';
+function piResponse(approve) {
+  return JSON.stringify({ approve }) + '\n';
 }
 
-test('Codex runs read-only with execution and integrations disabled and receives the request and policy', () => {
+test('Pi runs without tools or integrations on the chosen model with thinking off and receives the request and policy', () => {
   const prompt = parsePrompt('claude', CLAUDE);
   let calls = 0;
-  const result = reviewWithCodex(prompt, QUESTIONS.approve, (command, args, options) => {
+  const result = reviewWithPi(prompt, QUESTIONS.approve, (command, args, options) => {
     calls++;
-    assert.equal(command, 'codex');
-    assert.deepEqual(args.slice(0, 2), ['--no-daemon', 'exec']);
-    assert.equal(args.at(-1), '-');
-    assert.equal(args[args.indexOf('--model') + 1], 'gpt-6-luna');
-    assert.equal(args[args.indexOf('--sandbox') + 1], 'read-only');
-    for (const flag of ['--ephemeral', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check', '--json']) assert.ok(args.includes(flag));
-    const disabled = args.flatMap((argument, index) => argument === '--disable' ? [args[index + 1]] : []);
-    for (const feature of ['shell_tool', 'shell_snapshot', 'apps', 'plugins', 'hooks', 'multi_agent', 'browser_use', 'computer_use', 'image_generation', 'view_image', 'skill_search', 'goals']) assert.ok(disabled.includes(feature));
-    for (const setting of ['approval_policy="never"', 'web_search="disabled"', 'project_doc_max_bytes=0', 'skills.include_instructions=false', 'history.persistence="none"', 'model_reasoning_effort="low"']) assert.ok(args.includes(setting));
-    assert.match(args[args.indexOf('--output-schema') + 1], /decision\.schema\.json$/);
-    const policy = JSON.parse(args.find((argument) => argument.startsWith('developer_instructions=')).slice('developer_instructions='.length));
+    assert.equal(command, 'pi');
+    for (const flag of ['--print', '--no-session', '--no-tools', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-mcp', '--no-approve']) assert.ok(args.includes(flag));
+    assert.equal(args[args.indexOf('--model') + 1], 'deepseek/deepseek-v4.1-flash-1017');
+    assert.equal(args[args.indexOf('--thinking') + 1], 'off');
+    const policy = args[args.indexOf('--append-system-prompt') + 1];
     assert.ok(policy.includes(QUESTIONS.approve.instructions));
     assert.ok(policy.includes(QUESTIONS.approve.criteria.true));
     assert.ok(policy.includes(QUESTIONS.approve.criteria.false));
+    assert.ok(!policy.includes('earlier conversation'));
     assert.deepEqual(JSON.parse(options.input), { agent: prompt.agent, permission_request: prompt.text });
     assert.ok(!options.input.includes('earlier conversation'));
     assert.ok(!options.input.includes("don't ask again"));
@@ -227,39 +218,25 @@ test('Codex runs read-only with execution and integrations disabled and receives
     assert.equal(options.timeout, 30_000);
     assert.equal(options.killSignal, 'SIGKILL');
     assert.equal(options.maxBuffer, 64_000);
-    return codexResponse(true);
+    return piResponse(true);
   });
   assert.equal(calls, 1);
   assert.deepEqual(result, { approve: true, reason: 'reversible' });
 });
 
-test('Codex requires a completed turn and a structured boolean response without tool use', () => {
+test('Pi requires a structured boolean answer, also inside a JSON code fence', () => {
   const prompt = { text: 'npm test' };
   for (const output of ['approve', '{']) {
-    assert.deepEqual(reviewWithCodex(prompt, QUESTIONS.approve, () => output), { approve: false, reason: 'codex-unavailable' });
+    assert.deepEqual(reviewWithPi(prompt, QUESTIONS.approve, () => output), { approve: false, reason: 'pi-unavailable' });
   }
   for (const output of [
     'null', '{}', JSON.stringify({ result: '{"approve":true}' }),
-    codexResponse('true'), codexResponse(1), codexResponse(null),
-    codexResponse(true, { type: 'command_execution', command: 'npm test' }),
-    codexResponse(true).replace('turn.completed', 'turn.failed'),
-    codexResponse(true).replace('turn.completed', 'error'),
-    codexResponse(true).split('\n').slice(0, -2).join('\n'),
-    codexResponse(true) + JSON.stringify({ type: 'error' }),
-  ]) assert.deepEqual(reviewWithCodex(prompt, QUESTIONS.approve, () => output), { approve: false, reason: 'codex-invalid-decision' }, output);
-  assert.deepEqual(reviewWithCodex(prompt, QUESTIONS.approve, () => codexResponse(false)), { approve: false, reason: 'human-review' });
+    JSON.stringify({ approve: 'true' }), JSON.stringify({ approve: 1 }), JSON.stringify({ approve: null }),
+  ]) assert.deepEqual(reviewWithPi(prompt, QUESTIONS.approve, () => output), { approve: false, reason: 'pi-invalid-decision' }, output);
+  assert.deepEqual(reviewWithPi(prompt, QUESTIONS.approve, () => '```json\n{"approve":true}\n```'), { approve: true, reason: 'reversible' });
+  assert.deepEqual(reviewWithPi(prompt, QUESTIONS.approve, () => piResponse(false)), { approve: false, reason: 'human-review' });
   for (const code of ['ENOENT', 'ETIMEDOUT', 'ENOBUFS', 'auth-error']) {
-    assert.deepEqual(reviewWithCodex(prompt, QUESTIONS.approve, () => { throw Object.assign(new Error('private error'), { code }); }), { approve: false, reason: 'codex-unavailable' });
-  }
-});
-
-test('Codex rejects separate tool events even when a valid approval follows them', () => {
-  for (const type of ['command_execution', 'mcp_tool_call', 'collab_tool_call', 'file_change', 'web_search', 'error']) {
-    for (const eventType of ['item.started', 'item.completed']) {
-      const toolEvent = JSON.stringify({ type: eventType, item: { id: 'tool', type } }) + '\n';
-      const output = toolEvent + codexResponse(true);
-      assert.deepEqual(reviewWithCodex({ text: 'npm test' }, QUESTIONS.approve, () => output), { approve: false, reason: 'codex-invalid-decision' });
-    }
+    assert.deepEqual(reviewWithPi(prompt, QUESTIONS.approve, () => { throw Object.assign(new Error('private error'), { code }); }), { approve: false, reason: 'pi-unavailable' });
   }
 });
 
@@ -315,7 +292,7 @@ test('manual decisions, changed prompts, and local denials reach history once', 
     if (reason === 'human-only-action') state.text = CODEX.replaceAll('npm test', 'git push');
     else dependencies.decide = async () => {
       if (reason === 'prompt-changed') state.text = CODEX.replaceAll('npm test', 'rm -rf ~/Documents');
-      return { approve: reason === 'prompt-changed', reason: 'human-review', reviewer: 'codex', probability: 0.7 };
+      return { approve: reason === 'prompt-changed', reason: 'human-review', reviewer: 'pi', probability: 0.7 };
     };
     assert.equal((await review('w8:p1', dependencies)).reason, reason);
     assert.equal(entries.length, 1);
@@ -323,7 +300,7 @@ test('manual decisions, changed prompts, and local denials reach history once', 
     assert.equal(state.keys.length, 0);
     if (reason !== 'human-only-action') {
       assert.equal(entries[0].probability, 0.7);
-      assert.equal(entries[0].reviewer, 'codex');
+      assert.equal(entries[0].reviewer, 'pi');
     }
   }
 });
@@ -442,7 +419,7 @@ test('history write failures do not change approvals or permit a second send', a
   assert.deepEqual(errors, [{ pane: 'w8:p1', reason: 'history-unavailable' }]);
 });
 
-test('Codex approvals use the final prompt and plugin checks before sending one key', async () => {
+test('Pi approvals use the final prompt and plugin checks before sending one key', async () => {
   for (const change of [
     () => {},
     (s) => s.text = CODEX.replace('npm test', 'rm -rf ~/Documents'),
@@ -459,7 +436,7 @@ test('Codex approvals use the final prompt and plugin checks before sending one 
     assert.equal(state.keys.length, unchanged ? 1 : 0);
     if (unchanged) {
       assert.equal(result.reason, 'approved-once');
-      assert.equal(result.reviewer, 'codex');
+      assert.equal(result.reviewer, 'pi');
       assert.equal(result.probability, 0.7);
     }
   }

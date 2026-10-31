@@ -1,4 +1,4 @@
-import { reviewWithCodex } from './codex.mjs';
+import { reviewWithPi } from './pi.mjs';
 
 export const API_URL = 'https://api.typesafe.ai/v1/systemone';
 
@@ -45,7 +45,7 @@ export const QUESTIONS = {
   },
 };
 
-export async function classify(prompt, apiKey, fetchImpl = fetch, reviewCodex = reviewWithCodex) {
+export async function classify(prompt, apiKey, fetchImpl = fetch, reviewPi = reviewWithPi) {
   const reason = localReason(prompt.text);
   if (reason) return { approve: false, reason };
   try {
@@ -67,13 +67,13 @@ export async function classify(prompt, apiKey, fetchImpl = fetch, reviewCodex = 
     }
     if (answer.noul >= 0.8) return { approve: true, reason: 'reversible', probability: answer.noul };
     try {
-      let result = await reviewCodex(prompt, QUESTIONS.approve);
-      // Codex decisions on borderline requests change between runs. A plain decline
+      let result = await reviewPi(prompt, QUESTIONS.approve);
+      // Pi decisions on borderline requests change between runs. A plain decline
       // gets one second review. In evaluations, risky requests stayed declined in both.
-      if (result.approve !== true && result.reason === 'human-review') result = await reviewCodex(prompt, QUESTIONS.approve);
-      return { approve: result.approve === true, reason: result.reason, probability: answer.noul, reviewer: 'codex' };
+      if (result.approve !== true && result.reason === 'human-review') result = await reviewPi(prompt, QUESTIONS.approve);
+      return { approve: result.approve === true, reason: result.reason, probability: answer.noul, reviewer: 'pi' };
     } catch {
-      return { approve: false, reason: 'codex-unavailable', probability: answer.noul, reviewer: 'codex' };
+      return { approve: false, reason: 'pi-unavailable', probability: answer.noul, reviewer: 'pi' };
     }
   } catch {
     return { approve: false, reason: 'typesafe-unavailable' };

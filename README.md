@@ -1,6 +1,6 @@
 # Permission Approver for Herdr
 
-This plugin uses TypeSafe AI and Codex to approve one request at a time in
+This plugin uses TypeSafe AI and Pi to approve one request at a time in
 Claude Code and Codex. It reads the TypeSafe API key from the macOS Keychain service
 `model-router-typesafe`. It has no package dependencies.
 
@@ -11,8 +11,8 @@ cannot reverse for a human. It never selects a permanent or session-wide grant.
 ## Setup
 
 Requirements: macOS, Node.js 22 or later, Herdr 0.9.3 or later, and the existing
-Keychain entry. Node and an authenticated Codex CLI 0.163.0 or later
-must be on the Herdr server's PATH. The fallback uses the existing Codex login.
+Keychain entry. Node and an authenticated Pi CLI must be on the Herdr server's
+PATH. The fallback uses `deepseek/deepseek-v4.1-flash-1017` with thinking off.
 
 ```sh
 cd /Users/sang/Developer/herdr-permissions
@@ -30,7 +30,7 @@ herdr plugin enable sang.permissions
 ```
 
 The connection check sends one synthetic read-only request to TypeSafe. If the
-score is below 0.80, it also calls Codex. It does not read a pane or approve an
+score is below 0.80, it also calls Pi. It does not read a pane or approve an
 agent request. Check the command log for
 `"connected":true`. Standard TypeSafe API charges apply.
 
@@ -133,14 +133,14 @@ with `u` when a decision was wrong. The labels change later decisions in these
 ways:
 
 - `should approve` applies to the same request text in the same working
-  directory. That request is approved once when it arrives. Jev and Codex are
+  directory. That request is approved once when it arrives. Jev and Pi are
   not called, and the Keychain is not read. The history reviewer is `user` and
   the detail is `user-precedent`. The directory is part of the key, because the
   same command text can be harmless in a scratch checkout and destructive in a
   project. A row without a usable directory, including one whose path was
   hidden, cannot receive this label.
 - `should take no action` applies to the same request text in every directory.
-  That request stays for a human. Jev and Codex are not called, and the result
+  That request stays for a human. Jev and Pi are not called, and the result
   reason is `user-precedent-manual`. A no-action label wins over an approval
   label for the same request.
 - The local checks still run first. A request that contains a recognizable
@@ -195,14 +195,14 @@ A label is not a permanent grant. It repeats one decision for one request, and
 - Git pushes always stay with a human. The plugin also applies local checks for
   recognizable credentials and some destructive commands before it calls TypeSafe.
 - Jev approves requests with a valid approval probability of at least 0.80.
-  Every valid score below 0.80 goes to Codex for a second review with the
-  same policy. Codex must return a successful structured boolean approval.
-  Codex decisions on borderline requests vary between runs, so a plain Codex
-  rejection gets one more Codex review. Either approval approves the request
-  once. A Codex error is not reviewed again.
+  Every valid score below 0.80 goes to Pi for a second review with the
+  same policy. Pi must return a structured boolean approval.
+  Pi decisions on borderline requests vary between runs, so a plain Pi
+  rejection gets one more Pi review. Either approval approves the request
+  once. A Pi error is not reviewed again.
 - Missing credentials, network failures, malformed responses, uncertain decisions,
   hidden command text, and unknown prompt formats leave the prompt untouched.
-  A TypeSafe failure does not call Codex. Codex errors or rejection leave the
+  A TypeSafe failure does not call Pi. Pi errors or rejection leave the
   prompt for a human.
 
 The plugin sends the visible permission request to `api.typesafe.ai`. This can
@@ -211,16 +211,14 @@ and permission menu choices. The API key is sent only in the HTTPS authorization
 header. Recognizable credentials in a prompt stop the request locally. That check
 cannot identify every possible secret format.
 
-For scores below 0.80, the plugin also sends the request to Codex through
-the Codex CLI with `gpt-6-luna` and low reasoning effort. It does not send the
-TypeSafe key or the Jev score to Codex. The CLI runs in an ephemeral read-only session, with command
-execution, browser and computer access, app and plugin integrations, hooks, and
-`config.toml` configuration disabled. Project instructions and skill instructions
-are excluded. Codex still reads its global `AGENTS.md`; the review policy is
-supplied as higher-priority developer instructions. The CLI runs without the
-shared daemon, with session and history persistence disabled. A response that
-contains a tool action is rejected. Standard Codex
-usage limits and charges apply.
+For scores below 0.80, the plugin also sends the request to Pi through the Pi
+CLI with `deepseek/deepseek-v4.1-flash-1017` and thinking off. It does not send the TypeSafe key or the
+Jev score to Pi. The CLI runs one print-mode session with no session file, no
+built-in, extension, custom, or MCP tools, and no extensions, skills, prompt
+templates, or project context files. The review policy is appended to the system
+prompt, and the request is sent as untrusted data. Pi answers with a JSON
+boolean, and anything else is rejected. Standard Pi usage limits and charges
+apply.
 
 ## Supported prompts and limits
 
@@ -253,7 +251,7 @@ It stops when the agent enters another state. A new event handles that transitio
 Herdr 0.9.3 has no atomic request-specific approval operation. There is a small
 interval between the final check and key delivery. A user or another tool can
 change the prompt in that interval. A screen can also contain misleading text.
-Jev and Codex can make classification errors. This plugin reduces manual approvals;
+Jev and Pi can make classification errors. This plugin reduces manual approvals;
 it cannot guarantee that every irreversible action will reach a human.
 
 An interrupted hook leaves its current request for a human. A new agent transition
@@ -261,7 +259,7 @@ gets a new lock. An identical queued dialog without a state change also stays
 manual. Claim files contain hashes. History stores request text as described above.
 Command logs contain pane IDs and decision codes, not prompt text or credentials.
 The TypeSafe request has an eight-second timeout;
-Codex has a thirty-second timeout. Each Herdr request has a three-second timeout.
+Pi has a thirty-second timeout. Each Herdr request has a three-second timeout.
 
 An `unrecognized-or-changed-prompt` log entry now includes a `detail` field.
 `prompt-format-unrecognized` means the menu did not match a supported layout.
@@ -277,9 +275,9 @@ npm test
 npm run check
 ```
 
-Tests use synthetic permission dialogs, mock TypeSafe and Codex responses, and a
+Tests use synthetic permission dialogs, mock TypeSafe and Pi responses, and a
 local mock Herdr socket. They do not send input to live agents. They cover policy
-failures, Codex routing and responses, hidden content, secrets, duplicate events,
+failures, Pi routing and responses, hidden content, secrets, duplicate events,
 conversation redraws, safe retries, claim migration, queued dialogs, agent changes,
 and an uncertain send result.
 History tests cover private file modes, concurrent writes, credential hiding,
@@ -293,4 +291,4 @@ and a disabled plugin.
 References: [Herdr plugins](https://herdr.dev/docs/plugins/),
 [Herdr socket API](https://herdr.dev/docs/socket-api/),
 [TypeSafe API](https://docs.typesafe.ai/api), and
-[Codex CLI reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli).
+[Pi CLI reference](https://pi.dev/docs/latest/cli).
