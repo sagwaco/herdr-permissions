@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { API_URL, classify, localReason, QUESTIONS } from '../policy.mjs';
-import { reviewWithPi } from '../pi.mjs';
+import { reviewWithAgent } from '../reviewers.mjs';
 import { drain, eventTarget, main, PLUGIN_ID, review, rpc, withLock } from '../index.mjs';
 import { parsePrompt } from '../prompts.mjs';
 import { readHistory, recordHistory } from '../history.mjs';
@@ -278,7 +278,7 @@ function piResponse(approve) {
 test('Pi runs without tools or integrations on the chosen model with thinking off and receives the request and policy', () => {
   const prompt = parsePrompt('claude', CLAUDE);
   let calls = 0;
-  const result = reviewWithPi(prompt, QUESTIONS.approve, (command, args, options) => {
+  const result = reviewWithAgent(prompt, QUESTIONS.approve, undefined, (command, args, options) => {
     calls++;
     assert.equal(command, 'pi');
     for (const flag of ['--print', '--no-session', '--no-tools', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-mcp', '--no-approve']) assert.ok(args.includes(flag));
@@ -308,7 +308,7 @@ test('Pi receives referenced script contents without their local digests', () =>
     scripts: [{ path: '/private/tmp/x.py', text: 'print(1)\n', digest: 'local-only' }],
   };
   let input;
-  reviewWithPi(prompt, QUESTIONS.approve, (command, args, options) => {
+  reviewWithAgent(prompt, QUESTIONS.approve, undefined, (command, args, options) => {
     input = JSON.parse(options.input);
     return piResponse(true);
   });
@@ -321,16 +321,16 @@ test('Pi receives referenced script contents without their local digests', () =>
 test('Pi requires a structured boolean answer, also inside a JSON code fence', () => {
   const prompt = { text: 'npm test' };
   for (const output of ['approve', '{']) {
-    assert.deepEqual(reviewWithPi(prompt, QUESTIONS.approve, () => output), { approve: false, reason: 'pi-unavailable' });
+    assert.deepEqual(reviewWithAgent(prompt, QUESTIONS.approve, undefined, () => output), { approve: false, reason: 'pi-unavailable' });
   }
   for (const output of [
     'null', '{}', JSON.stringify({ result: '{"approve":true}' }),
     JSON.stringify({ approve: 'true' }), JSON.stringify({ approve: 1 }), JSON.stringify({ approve: null }),
-  ]) assert.deepEqual(reviewWithPi(prompt, QUESTIONS.approve, () => output), { approve: false, reason: 'pi-invalid-decision' }, output);
-  assert.deepEqual(reviewWithPi(prompt, QUESTIONS.approve, () => '```json\n{"approve":true}\n```'), { approve: true, reason: 'reversible' });
-  assert.deepEqual(reviewWithPi(prompt, QUESTIONS.approve, () => piResponse(false)), { approve: false, reason: 'human-review' });
+  ]) assert.deepEqual(reviewWithAgent(prompt, QUESTIONS.approve, undefined, () => output), { approve: false, reason: 'pi-invalid-decision' }, output);
+  assert.deepEqual(reviewWithAgent(prompt, QUESTIONS.approve, undefined, () => '```json\n{"approve":true}\n```'), { approve: true, reason: 'reversible' });
+  assert.deepEqual(reviewWithAgent(prompt, QUESTIONS.approve, undefined, () => piResponse(false)), { approve: false, reason: 'human-review' });
   for (const code of ['ENOENT', 'ETIMEDOUT', 'ENOBUFS', 'auth-error']) {
-    assert.deepEqual(reviewWithPi(prompt, QUESTIONS.approve, () => { throw Object.assign(new Error('private error'), { code }); }), { approve: false, reason: 'pi-unavailable' });
+    assert.deepEqual(reviewWithAgent(prompt, QUESTIONS.approve, undefined, () => { throw Object.assign(new Error('private error'), { code }); }), { approve: false, reason: 'pi-unavailable' });
   }
 });
 
@@ -987,4 +987,28 @@ test('the event hook applies stored labels before the classifier over the socket
     await new Promise((resolve) => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('settings turn off labels and Jev for the hook without reading the Keychain', async () => {
+  const { state, dependencies } = harness();
+  dependencies.precedent = () => ({ approve: false, reason: 'user-precedent-manual' });
+  dependencies.getKey = () => assert.fail('the Keychain must not be read');
+  dependencies.settings = { secrets: true, humanOnly: true, labels: false, jev: false, agent: true, harness: 'pi', model: 'm' };
+  dependencies.decide = async (request, key, settings) => {
+    assert.equal(key, null);
+    assert.equal(settings, dependencies.settings);
+    return { approve: true, reason: 'reversible', reviewer: 'pi' };
+  };
+  assert.equal((await review('w8:p1', dependencies)).reason, 'approved-once');
+  assert.equal(state.keys.length, 1);
+});
+
+test('each request in a drain reads the current settings, and damaged settings stay manual', async () => {
+  const { state, dependencies } = harness();
+  let reads = 0;
+  dependencies.settings = async () => { reads++; throw new Error('settings-invalid'); };
+  dependencies.decide = () => assert.fail('must not classify with damaged settings');
+  await assert.rejects(review('w8:p1', dependencies));
+  assert.equal(reads, 1);
+  assert.deepEqual(state.keys, []);
 });

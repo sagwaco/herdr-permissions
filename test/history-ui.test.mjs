@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import {
-  sanitize, clip, detailLines, replaceHistory, replacePending, annotate, selectedEntry, switchTab,
+  sanitize, clip, detailLines, entryActions, textRows, actionIndex, replaceHistory, replacePending, annotate, selectedEntry, switchTab,
   navigate, requestSummary, renderPlain, renderScreen, approveMessage, main,
 } from '../history-ui.mjs';
 
@@ -92,6 +92,11 @@ test('list and detail navigation support arrows, j/k, pages, home/end, Enter, an
   assert.equal(navigate(current, 'down', 4, 20).offset, 16);
   assert.equal(navigate(current, 'pageup', 4, 20).offset, 12);
   assert.equal(navigate(current, 'home', 4, 20).offset, 0);
+  // In details, line keys choose an action and do not scroll.
+  const actions = [['a', 'Approve once'], ['f', 'Focus pane'], ['escape', 'Back']];
+  assert.equal(navigate(current, 'down', 4, 20, actions).action, 'escape');
+  assert.equal(navigate({ ...current, action: 'escape' }, 'j', 4, 20, actions).action, 'escape');
+  assert.equal(navigate({ ...current, action: 'f' }, 'k', 4, 20, actions).action, 'a');
   assert.equal(navigate(current, 'escape', 4).detail, false);
   assert.equal(navigate(state([]), 'return', 4).detail, false);
 });
@@ -102,7 +107,7 @@ test('details contain the full request and optional fields and scroll to the end
   assert.match(details.join('\n'), /Jev score: 0/);
   assert.match(details.join('\n'), /Detail: reason-code/);
   assert.match(details.join('\n'), /first line/);
-  const current = navigate(state([row], { detail: true }), 'end', 5, details.length);
+  const current = navigate(state([row], { detail: true }), 'end', textRows(5, entryActions(row)), details.length);
   assert.match(renderScreen(current, 31, 8), /LAST LINE/);
 });
 
@@ -114,15 +119,7 @@ test('empty history and read errors remain readable', () => {
 
 function displayWidth(s) {
   let width = 0;
-  let inEscape = false;
-  for (const ch of s) {
-    if (inEscape) {
-      if ((ch >= '@' && ch <= '~') || (ch >= ' ' && ch <= '/')) inEscape = false;
-      continue;
-    }
-    if (ch === '\x1b') { inEscape = true; continue; }
-    width += ch.codePointAt(0) > 0x7e ? 2 : 1;
-  }
+  for (const ch of stripAnsi(s)) width += ch.codePointAt(0) > 0x7e ? 2 : 1;
   return width;
 }
 
@@ -289,7 +286,10 @@ test('each list keeps its own selection and Tab switches between them', () => {
   let current = state(rows, { pending });
   current = navigate(current, 'down', 5);
   assert.equal(current.selected, 1);
-  current = switchTab(current);
+  // Tab goes 1, 2, 3, then back to 1. Shift+Tab goes back.
+  assert.equal(switchTab(current).tab, 'settings');
+  assert.equal(switchTab(switchTab(current)).tab, 'pending');
+  current = switchTab(current, -1);
   assert.equal(current.tab, 'pending');
   assert.equal(current.pendingSelected, 0);
   assert.equal(selectedEntry(current).pane, 'w2:p1');
@@ -298,6 +298,7 @@ test('each list keeps its own selection and Tab switches between them', () => {
   current = navigate(current, 'return', 5);
   assert.match(stripAnsi(renderScreen(current, 110, 10)), /2\/2 \| Details/);
   current = switchTab(current);
+  assert.equal(current.tab, 'history');
   assert.equal(current.detail, false);
   assert.equal(current.selected, 1);
   assert.equal(replacePending(current, [pending[0]]).pendingSelected, 0);
@@ -311,6 +312,27 @@ test('each list keeps its own selection and Tab switches between them', () => {
   const sameRequest = replacePending(state(rows, { pending, tab: 'pending', pendingSelected: 1 }), [pending[1], pending[0]]);
   assert.equal(sameRequest.pendingSelected, 0);
   assert.equal(sameRequest.pending[0].pane, 'w2:p2');
+  // Open details close when the request in the pane changes.
+  const open = state(rows, { pending, tab: 'pending', pendingSelected: 1, detail: true });
+  assert.equal(replacePending(open, [{ ...pending[1], request: '$ three' }]).detail, false);
+  assert.equal(replacePending(open, [{ ...pending[1], identity: 'new' }]).detail, false);
+  assert.equal(replacePending(open, [pending[1]]).detail, true);
+});
+
+test('the chosen action follows its key when the action list changes', () => {
+  const idle = entryActions({ pane: 'w1:p1', request: 'x' });
+  const live = entryActions({ pane: 'w1:p1', request: 'x', live: true, label: 'approve' });
+  assert.equal(idle[actionIndex(idle, undefined)][0], 'f');
+  assert.equal(live[actionIndex(live, undefined)][0], 'f');
+  assert.equal(live[actionIndex(live, 'f')][0], 'f');
+  // A removed action selects Back, not the action that took its place.
+  assert.equal(idle[actionIndex(idle, 'u')][0], 'escape');
+  assert.equal(idle[actionIndex(idle, 'a')][0], 'escape');
+  // A very short pane still shows the chosen action.
+  for (const rows of [4, 5]) {
+    const screen = stripAnsi(renderScreen({ tab: 'settings', settingsDetail: true, settingsSelected: 0, settings: undefined }, 60, rows));
+    assert.match(screen, /Action 1\/2: > Turn off Space/, String(rows));
+  }
 });
 
 test('detail view shows the user label, liveness, missing fields, and scrolls', () => {
@@ -351,7 +373,9 @@ test('keys approve a live request, record labels, and focus another pane', async
   });
   try {
     await ready(box);
-    assert.match(box.text, /Tab lists/);
+    assert.match(box.text, /Tab views/);
+    input.emit('keypress', '', { name: 'tab' });
+    assert.match(stripAnsi(box.text), /Review pipeline/);
     input.emit('keypress', '', { name: 'tab' });
     assert.match(stripAnsi(box.text), /Pending requests \| Live/);
     input.emit('keypress', 'a', { name: 'a' });
@@ -362,7 +386,15 @@ test('keys approve a live request, record labels, and focus another pane', async
     await until(() => /Marked should take no action/.test(box.text), 'the no-action label');
     input.emit('keypress', 'u', { name: 'u' });
     await until(() => /Label cleared/.test(box.text), 'the cleared label');
-    input.emit('keypress', 'f', { name: 'f' });
+    // The detail view lists actions. Enter runs the chosen one.
+    input.emit('keypress', '', { name: 'return' });
+    // The first choice never approves, so a double Enter cannot approve.
+    assert.match(stripAnsi(box.text), /Action 2\/5: > Focus pane f/);
+    input.emit('keypress', 'k', { name: 'k' });
+    assert.match(stripAnsi(box.text), /Action 1\/5: > Approve once a/);
+    input.emit('keypress', 'j', { name: 'j' });
+    assert.match(stripAnsi(box.text), /Action 2\/5: > Focus pane f/);
+    input.emit('keypress', '', { name: 'return' });
     await running;
   } finally { input.destroy(); }
   assert.deepEqual(calls, [
@@ -389,7 +421,7 @@ test('the interface refuses to approve a request without a parsed prompt', async
   });
   try {
     await ready(box);
-    input.emit('keypress', '', { name: 'tab' });
+    input.emit('keypress', '', { name: 'tab', shift: true });
     input.emit('keypress', 'a', { name: 'a' });
     await until(() => /no approvable prompt/.test(box.text), 'the refusal status');
     input.emit('keypress', 'q', { name: 'q' });

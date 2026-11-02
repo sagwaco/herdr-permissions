@@ -1,4 +1,5 @@
-import { reviewWithPi } from './pi.mjs';
+import { reviewWithAgent } from './reviewers.mjs';
+import { DEFAULT_SETTINGS } from './settings.mjs';
 
 export const API_URL = 'https://api.typesafe.ai/v1/systemone';
 
@@ -28,9 +29,9 @@ const HUMAN_ONLY = [
   /\b(?:ignore|disregard)\b[^\n]{0,60}\b(?:instructions|policy|rules)\b/i,
 ];
 
-export function localReason(text) {
-  if (SENSITIVE.some((pattern) => pattern.test(text))) return 'sensitive-content';
-  if (HUMAN_ONLY.some((pattern) => pattern.test(text))) return 'human-only-action';
+export function localReason(text, settings = DEFAULT_SETTINGS) {
+  if (settings.secrets && SENSITIVE.some((pattern) => pattern.test(text))) return 'sensitive-content';
+  if (settings.humanOnly && HUMAN_ONLY.some((pattern) => pattern.test(text))) return 'human-only-action';
   return null;
 }
 
@@ -61,9 +62,28 @@ export const QUESTIONS = {
   },
 };
 
-export async function classify(prompt, apiKey, fetchImpl = fetch, reviewPi = reviewWithPi) {
-  const reason = localReason(policyText(prompt));
+// The agent review decisions on borderline requests change between runs. A
+// plain decline gets one second review. In evaluations, risky requests stayed
+// declined in both.
+async function agentReview(prompt, settings, reviewAgent) {
+  const reviewer = settings.harness;
+  try {
+    let result = await reviewAgent(prompt, QUESTIONS.approve, settings);
+    if (result.approve !== true && result.reason === 'human-review') result = await reviewAgent(prompt, QUESTIONS.approve, settings);
+    return { approve: result.approve === true, reason: result.reason, reviewer };
+  } catch {
+    return { approve: false, reason: `${reviewer}-unavailable`, reviewer };
+  }
+}
+
+// Jev runs only when it is on and a key is present. Without Jev, the agent
+// review decides alone. A Jev failure does not call the agent review.
+export async function classify(prompt, apiKey, fetchImpl = fetch, reviewAgent = reviewWithAgent, settings = DEFAULT_SETTINGS) {
+  const reason = localReason(policyText(prompt), settings);
   if (reason) return { approve: false, reason };
+  if (!settings.jev || !apiKey) {
+    return settings.agent ? agentReview(prompt, settings, reviewAgent) : { approve: false, reason: 'no-reviewer', reviewer: 'none' };
+  }
   try {
     const response = await fetchImpl(API_URL, {
       method: 'POST',
@@ -81,16 +101,9 @@ export async function classify(prompt, apiKey, fetchImpl = fetch, reviewPi = rev
     if (answer?.type !== 'noul' || !Number.isFinite(answer.noul) || answer.noul < 0 || answer.noul > 1) {
       return { approve: false, reason: 'invalid-decision' };
     }
-    if (answer.noul >= 0.8) return { approve: true, reason: 'reversible', probability: answer.noul };
-    try {
-      let result = await reviewPi(prompt, QUESTIONS.approve);
-      // Pi decisions on borderline requests change between runs. A plain decline
-      // gets one second review. In evaluations, risky requests stayed declined in both.
-      if (result.approve !== true && result.reason === 'human-review') result = await reviewPi(prompt, QUESTIONS.approve);
-      return { approve: result.approve === true, reason: result.reason, probability: answer.noul, reviewer: 'pi' };
-    } catch {
-      return { approve: false, reason: 'pi-unavailable', probability: answer.noul, reviewer: 'pi' };
-    }
+    if (answer.noul >= settings.jevThreshold) return { approve: true, reason: 'reversible', probability: answer.noul };
+    if (!settings.agent) return { approve: false, reason: 'below-threshold', probability: answer.noul };
+    return { ...(await agentReview(prompt, settings, reviewAgent)), probability: answer.noul };
   } catch {
     return { approve: false, reason: 'typesafe-unavailable' };
   }

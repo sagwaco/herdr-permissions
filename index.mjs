@@ -1,28 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { classify, localReason, policyText } from './policy.mjs';
+import { reviewWithAgent } from './reviewers.mjs';
+import { DEFAULT_SETTINGS, readKeychain, readSettings } from './settings.mjs';
 import { readScripts, verifyScripts } from './scripts.mjs';
 import { codexPreviewClipped, expandCodexPreview, parsePrompt } from './prompts.mjs';
 import { recordHistory } from './history.mjs';
 import { labelFor, labelIndex, precedentDecision, readFeedback } from './feedback.mjs';
 
 export const PLUGIN_ID = 'sang.permissions';
-
-export function readKeychain() {
-  if (process.platform !== 'darwin') throw new Error('keychain-unavailable');
-  try {
-    const key = execFileSync('/usr/bin/security', [
-      'find-generic-password', '-s', 'model-router-typesafe', '-w',
-    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim();
-    if (key) return key;
-  } catch { /* Keychain errors must not expose a credential or block the agent. */ }
-  throw new Error('keychain-unavailable');
-}
 
 export function rpc(socketPath, method, params) {
   return new Promise((resolve, reject) => {
@@ -183,7 +173,10 @@ export async function snapshot(call, target, attempts = 5) {
   return { identity: identity(after), agent: after, text, prompt, cwd: after.foreground_cwd ?? after.cwd };
 }
 
-export async function review(target, { call, getKey = readKeychain, decide = classify, claim, release, decline = async () => {}, expectedIdentity, precedent, record = async () => {} }) {
+const classifyWith = (request, key, settings) => classify(request, key, fetch, reviewWithAgent, settings);
+
+// `settings` can be a function, so each request in a drain reads the current file.
+export async function review(target, { call, getKey = readKeychain, decide = classifyWith, settings = DEFAULT_SETTINGS, claim, release, decline = async () => {}, expectedIdentity, precedent, record = async () => {} }) {
   const initial = await snapshot(call, target);
   if (initial.reason) return { reason: 'unrecognized-or-changed-prompt', detail: initial.reason };
   if (expectedIdentity !== undefined && initial.identity !== expectedIdentity) return { reason: 'agent-transitioned' };
@@ -211,7 +204,10 @@ export async function review(target, { call, getKey = readKeychain, decide = cla
     return { reason: 'script-unreadable' };
   }
   let result;
-  try { result = await decideAndSend(target, initial, { call, getKey, decide, precedent, scripts, release: () => release(fingerprint) }); }
+  try {
+    const current = typeof settings === 'function' ? await settings() : settings;
+    result = await decideAndSend(target, initial, { call, getKey, decide, settings: current, precedent, scripts, release: () => release(fingerprint) });
+  }
   catch (error) {
     const sent = error.message === 'approval-delivery-unknown';
     if (!sent) await markDeclined();
@@ -223,16 +219,18 @@ export async function review(target, { call, getKey = readKeychain, decide = cla
   return result;
 }
 
-async function decideAndSend(target, initial, { call, getKey, decide, precedent, release, scripts = [] }) {
+async function decideAndSend(target, initial, { call, getKey, decide, settings, precedent, release, scripts = [] }) {
   const request = scripts.length ? { ...initial.prompt, scripts } : initial.prompt;
-  const reason = localReason(policyText(request));
+  const reason = localReason(policyText(request), settings);
   if (reason) return { reason };
   // A user label for the exact same request replaces the classifier decision.
   // Local checks above still win, so secrets and human-only actions stay manual.
   // A text-only approval label must not approve different script contents.
-  const prior = precedent?.(initial.prompt.text, initial.cwd) ?? null;
+  const prior = settings.labels ? precedent?.(initial.prompt.text, initial.cwd) ?? null : null;
   const usesPrior = Boolean(prior && (!prior.approve || scripts.length === 0));
-  const decision = usesPrior ? prior : await decide(request, getKey());
+  // getKey gives null for a missing key, which turns Jev off for this request.
+  const key = !usesPrior && settings.jev ? getKey() : null;
+  const decision = usesPrior ? prior : await decide(request, key, settings);
   if (!decision.approve) return decision;
   // Disabling the plugin must stop an approval that is already in progress.
   const registry = await call('plugin.list', { plugin_id: PLUGIN_ID });
@@ -341,8 +339,11 @@ export async function main(mode, env = process.env) {
   }
   const call = (method, params) => rpc(env.HERDR_SOCKET_PATH, method, params);
   if (mode === 'check') {
-    const result = await classify({ agent: 'codex', text: 'Would you like to run the following command?\n\n$ git status --short' }, readKeychain());
-    console.log(JSON.stringify({ ...result, connected: result.probability !== undefined }));
+    const settings = await readSettings(env.HERDR_PLUGIN_STATE_DIR);
+    const key = settings.jev ? readKeychain() : null;
+    const result = await classifyWith({ agent: 'codex', text: 'Would you like to run the following command?\n\n$ git status --short' }, key, settings);
+    const jev = !settings.jev ? 'off' : key ? 'on' : 'no-key';
+    console.log(JSON.stringify({ ...result, jev, connected: result.approve === true || result.probability !== undefined }));
     return;
   }
   let targets;
@@ -367,6 +368,7 @@ export async function main(mode, env = process.env) {
         await sleep(350);
         return drain(target, {
           call, claim, release, decline, expectedIdentity: identity(agent), precedent,
+          settings: () => readSettings(env.HERDR_PLUGIN_STATE_DIR),
           record: (entry) => recordHistory(env.HERDR_PLUGIN_STATE_DIR, entry),
         }, {
           report: (result) => console.log(JSON.stringify({ pane: target, ...result })),

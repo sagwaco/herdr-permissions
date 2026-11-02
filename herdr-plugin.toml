@@ -2,7 +2,7 @@ id = "sang.permissions"
 name = "Permission Approver"
 version = "0.1.0"
 min_herdr_version = "0.9.3"
-description = "Use TypeSafe AI to approve reversible agent requests, review them in a pane, and leave irreversible actions for a human"
+description = "Review agent requests with local filters, TypeSafe Jev, and an agent of your choice; approve reversible ones and leave irreversible actions for a human"
 platforms = ["macos"]
 
 [[actions]]
