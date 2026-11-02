@@ -146,7 +146,10 @@ ways:
 - The local checks still run first. A request that contains a recognizable
   credential (`sensitive-content`) or a human-only action stays with a human even
   when it has a `should approve` label. Changing the plugin to a disabled state
-  also stops a labeled approval, and the final prompt check still applies.
+  also stops a labeled approval, and the final prompt check still applies. For a
+  request that runs a local script, an approval label does not skip the script
+  review, because the label only covers the request text and not the script
+  contents. A no-action label still applies.
 - Matching is exact. A request that differs in one character, one path, one flag,
   or one space has no effect. Pending rows can be labeled before approval.
 
@@ -181,6 +184,16 @@ A label is not a permanent grant. It repeats one decision for one request, and
   as `--dry-run`, `git clean -n`, and `rsync -n`, can pass when every other command
   in the request is also safe. The local push and publish rules still apply to
   dry runs.
+- When a command runs a local script, such as
+  `python3 -I /private/tmp/install.py`, the plugin reads the script and sends its
+  contents to both reviewers. They judge the script's operations against the
+  stated reason and the same decision rules. A script can pass when its stated
+  purpose matches what it does and its effects are reversible, for example when
+  it checks a backup, verifies hashes, stages replacements, and restores the
+  previous files after a failure. Common interpreters such as `python3`, `node`,
+  `bash`, `sh`, `zsh`, `ruby`, `perl`, and `php` are recognized when their
+  script path has a matching extension. The plugin re-reads the script before
+  sending the approval key, so a script that changed during review stays manual.
 - Herdr commands that inspect the session or manage panes and tabs can pass:
   list, get, read, wait, and status commands, pane splits, and tab creation or
   closure. `herdr pane run` can pass when the command that it runs is safe. Agent
@@ -206,10 +219,15 @@ A label is not a permanent grant. It repeats one decision for one request, and
   prompt for a human.
 
 The plugin sends the visible permission request to `api.typesafe.ai`. This can
-include paths, commands, and source code. It excludes preceding conversation text
-and permission menu choices. The API key is sent only in the HTTPS authorization
-header. Recognizable credentials in a prompt stop the request locally. That check
-cannot identify every possible secret format.
+include paths, commands, and source code. For a command that runs a local script,
+it also sends that script's contents. Script contents are read only from a
+temporary directory or the agent's project directory, are included only when the
+command clearly runs them, and are bounded to 32 KiB per script and 64 KiB in
+total. A script that is larger, unreadable, or outside those directories leaves
+the request for a human. It excludes preceding conversation text and permission menu choices. The API key is
+sent only in the HTTPS authorization header. Recognizable credentials in a prompt
+or script stop the request locally. That check cannot identify every possible
+secret format. History stores the request text but not the script contents.
 
 For scores below 0.80, the plugin also sends the request to Pi through the Pi
 CLI with `deepseek/deepseek-v4.1-flash-1017` and thinking off. It does not send the TypeSafe key or the
@@ -265,6 +283,11 @@ Command logs contain pane IDs and decision codes, not prompt text or credentials
 The TypeSafe request has an eight-second timeout;
 Pi has a thirty-second timeout. Each Herdr request has a three-second timeout.
 
+A `script-unreadable` result means the command runs a local script that the
+plugin could not read inside those directories, or that is too many or too large
+to send for review. A `script-changed` result means the reviewed script no longer
+matches the file on disk, so no key was sent. Both stay with a human.
+
 An `unrecognized-or-changed-prompt` log entry now includes a `detail` field.
 `prompt-format-unrecognized` means the menu did not match a supported layout.
 `pane-read-truncated` means Herdr omitted some text.
@@ -281,7 +304,8 @@ npm run check
 
 Tests use synthetic permission dialogs, mock TypeSafe and Pi responses, and a
 local mock Herdr socket. They do not send input to live agents. They cover policy
-failures, Pi routing and responses, hidden content, secrets, duplicate events,
+failures, Pi routing and responses, script review and script changes, hidden
+content, secrets, duplicate events,
 conversation redraws, safe retries, claim migration, queued dialogs, agent changes,
 Codex pager expansion, and an uncertain send result.
 History tests cover private file modes, concurrent writes, credential hiding,

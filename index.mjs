@@ -5,7 +5,8 @@ import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { classify, localReason } from './policy.mjs';
+import { classify, localReason, policyText } from './policy.mjs';
+import { readScripts, verifyScripts } from './scripts.mjs';
 import { codexPreviewClipped, expandCodexPreview, parsePrompt } from './prompts.mjs';
 import { recordHistory } from './history.mjs';
 import { labelFor, labelIndex, precedentDecision, readFeedback } from './feedback.mjs';
@@ -201,8 +202,16 @@ export async function review(target, { call, getKey = readKeychain, decide = cla
     try { await decline(fingerprint); }
     catch { console.error(JSON.stringify({ pane: target, reason: 'claim-decline-unavailable' })); }
   };
+  let scripts;
+  try { scripts = (await readScripts(initial.prompt.text, initial.cwd)).scripts; }
+  catch { scripts = null; }
+  if (!scripts) {
+    await markDeclined();
+    await save({ reason: 'script-unreadable', reviewer: 'local' });
+    return { reason: 'script-unreadable' };
+  }
   let result;
-  try { result = await decideAndSend(target, initial, { call, getKey, decide, precedent, release: () => release(fingerprint) }); }
+  try { result = await decideAndSend(target, initial, { call, getKey, decide, precedent, scripts, release: () => release(fingerprint) }); }
   catch (error) {
     const sent = error.message === 'approval-delivery-unknown';
     if (!sent) await markDeclined();
@@ -214,13 +223,16 @@ export async function review(target, { call, getKey = readKeychain, decide = cla
   return result;
 }
 
-async function decideAndSend(target, initial, { call, getKey, decide, precedent, release }) {
-  const reason = localReason(initial.prompt.text);
+async function decideAndSend(target, initial, { call, getKey, decide, precedent, release, scripts = [] }) {
+  const request = scripts.length ? { ...initial.prompt, scripts } : initial.prompt;
+  const reason = localReason(policyText(request));
   if (reason) return { reason };
   // A user label for the exact same request replaces the classifier decision.
   // Local checks above still win, so secrets and human-only actions stay manual.
+  // A text-only approval label must not approve different script contents.
   const prior = precedent?.(initial.prompt.text, initial.cwd) ?? null;
-  const decision = prior ?? await decide(initial.prompt, getKey());
+  const usesPrior = Boolean(prior && (!prior.approve || scripts.length === 0));
+  const decision = usesPrior ? prior : await decide(request, getKey());
   if (!decision.approve) return decision;
   // Disabling the plugin must stop an approval that is already in progress.
   const registry = await call('plugin.list', { plugin_id: PLUGIN_ID });
@@ -235,9 +247,13 @@ async function decideAndSend(target, initial, { call, getKey, decide, precedent,
     catch { console.error(JSON.stringify({ pane: target, reason: 'claim-release-unavailable' })); }
     return { ...decision, approve: false, reason: 'prompt-changed', ...(current.reason ? { detail: current.reason } : {}) };
   }
+  if (scripts.length) {
+    const changed = await verifyScripts(scripts);
+    if (changed) return { ...decision, approve: false, reason: changed.reason };
+  }
   try { await call('agent.send_keys', { target, keys: initial.prompt.keys }); }
   catch { throw new Error('approval-delivery-unknown'); }
-  return { ...decision, reason: 'approved-once', ...(prior ? { detail: 'user-precedent' } : {}) };
+  return { ...decision, reason: 'approved-once', ...(usesPrior ? { detail: 'user-precedent' } : {}) };
 }
 
 export async function drain(target, dependencies, { pause = sleep, report = () => {} } = {}) {

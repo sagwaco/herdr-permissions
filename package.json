@@ -8,6 +8,6 @@
   },
   "scripts": {
     "test": "node --test",
-    "check": "node --check index.mjs && node --check policy.mjs && node --check prompts.mjs && node --check pi.mjs && node --check history.mjs && node --check feedback.mjs && node --check actions.mjs && node --check history-ui.mjs && node --check panes.mjs && node --check open.mjs"
+    "check": "node --check index.mjs && node --check policy.mjs && node --check scripts.mjs && node --check prompts.mjs && node --check pi.mjs && node --check history.mjs && node --check feedback.mjs && node --check actions.mjs && node --check history-ui.mjs && node --check panes.mjs && node --check open.mjs"
   }
 }

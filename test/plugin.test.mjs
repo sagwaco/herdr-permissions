@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
@@ -168,6 +168,27 @@ function response(noul, extra = {}) {
   return { ok: true, json: async () => ({ answers: { approve: { type: 'noul', noul, ...extra } } }) };
 }
 
+test('script contents reach both reviewers and the local checks', async () => {
+  const scripts = [{ path: '/private/tmp/install.py', text: 'print("ok")\n', digest: 'digest' }];
+  const prompt = { agent: 'codex', text: '  $ python3 -I /private/tmp/install.py', scripts };
+  const result = await classify(prompt, 'test-key', async (url, options) => {
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.state.referenced_scripts, [{ path: '/private/tmp/install.py', text: 'print("ok")\n' }]);
+    return response(0.9);
+  }, () => assert.fail('must not call Pi'));
+  assert.equal(result.approve, true);
+  let reviewed;
+  await classify(prompt, 'test-key', async () => response(0.5), async (request) => {
+    reviewed = request;
+    return { approve: true, reason: 'reversible' };
+  });
+  assert.equal(reviewed.scripts[0].text, 'print("ok")\n');
+  let calls = 0;
+  const human = { ...prompt, scripts: [{ path: '/private/tmp/push.py', text: 'git push origin main\n' }] };
+  assert.equal((await classify(human, 'test-key', () => calls++, () => calls++)).reason, 'human-only-action');
+  assert.equal(calls, 0);
+});
+
 test('TypeSafe uses the fixed HTTPS endpoint and keeps the credential outside state', async () => {
   const result = await classify(parsePrompt('claude', CLAUDE), 'test-key', async (url, options) => {
     assert.equal(url, API_URL);
@@ -281,6 +302,22 @@ test('Pi runs without tools or integrations on the chosen model with thinking of
   assert.deepEqual(result, { approve: true, reason: 'reversible' });
 });
 
+test('Pi receives referenced script contents without their local digests', () => {
+  const prompt = {
+    agent: 'codex', text: '  $ python3 /private/tmp/x.py',
+    scripts: [{ path: '/private/tmp/x.py', text: 'print(1)\n', digest: 'local-only' }],
+  };
+  let input;
+  reviewWithPi(prompt, QUESTIONS.approve, (command, args, options) => {
+    input = JSON.parse(options.input);
+    return piResponse(true);
+  });
+  assert.deepEqual(input, {
+    agent: 'codex', permission_request: prompt.text,
+    referenced_scripts: [{ path: '/private/tmp/x.py', text: 'print(1)\n' }],
+  });
+});
+
 test('Pi requires a structured boolean answer, also inside a JSON code fence', () => {
   const prompt = { text: 'npm test' };
   for (const output of ['approve', '{']) {
@@ -321,6 +358,89 @@ function harness() {
   };
   return { state, dependencies };
 }
+
+test('a referenced local script is reviewed with its contents and stays out of history', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'permissions-script-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = join(dir, 'install.py');
+  await writeFile(script, 'print("install")\n');
+  const { state, dependencies } = harness();
+  state.text = CODEX.replace('$ npm test', `$ python3 -I ${script}`);
+  const entries = [];
+  dependencies.record = async (entry) => entries.push(entry);
+  dependencies.decide = async (prompt) => {
+    state.decisions++;
+    assert.equal(prompt.scripts.length, 1);
+    assert.equal(prompt.scripts[0].path, await realpath(script));
+    assert.equal(prompt.scripts[0].text, 'print("install")\n');
+    return { approve: true, reason: 'reversible' };
+  };
+  assert.equal((await review('w8:p1', dependencies)).reason, 'approved-once');
+  assert.deepEqual(state.keys, [{ target: 'w8:p1', keys: ['y'] }]);
+  assert.equal(entries[0].request, parsePrompt('codex', state.text).text);
+  assert.equal(JSON.stringify(entries).includes('print("install")'), false);
+});
+
+test('a script changed after review or outside the allowed roots stays manual', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'permissions-script-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = join(dir, 'install.py');
+  await writeFile(script, 'print("before")\n');
+  {
+    const { state, dependencies } = harness();
+    state.text = CODEX.replace('$ npm test', `$ python3 -I ${script}`);
+    const entries = [];
+    dependencies.record = async (entry) => entries.push(entry);
+    dependencies.decide = async () => {
+      await writeFile(script, 'print("after")\n');
+      return { approve: true, reason: 'reversible' };
+    };
+    assert.equal((await review('w8:p1', dependencies)).reason, 'script-changed');
+    assert.deepEqual(state.keys, []);
+    assert.equal(entries[0].reason, 'script-changed');
+  }
+  {
+    const outside = await mkdtemp(join(process.cwd(), '.permissions-outside-'));
+    t.after(() => rm(outside, { recursive: true, force: true }));
+    const path = join(outside, 'install.py');
+    await writeFile(path, 'print("outside")\n');
+    const { state, dependencies } = harness();
+    state.agent.cwd = '/nonexistent-project-root';
+    state.text = CODEX.replace('$ npm test', `$ python3 ${path}`);
+    const entries = [];
+    dependencies.record = async (entry) => entries.push(entry);
+    dependencies.decide = () => assert.fail('must not classify an unreadable script');
+    dependencies.getKey = () => assert.fail('must not read credentials');
+    assert.equal((await review('w8:p1', dependencies)).reason, 'script-unreadable');
+    assert.deepEqual(state.keys, []);
+    assert.equal(entries[0].reviewer, 'local');
+  }
+});
+
+test('an approval label does not skip script review, and local checks inspect scripts', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'permissions-script-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = join(dir, 'install.py');
+  await writeFile(script, 'print("install")\n');
+  {
+    const { state, dependencies } = harness();
+    state.text = CODEX.replace('$ npm test', `$ python3 -I ${script}`);
+    dependencies.precedent = () => ({ approve: true, reason: 'reversible', reviewer: 'user' });
+    dependencies.decide = async () => { state.decisions++; return { approve: true, reason: 'reversible' }; };
+    const result = await review('w8:p1', dependencies);
+    assert.equal(result.reason, 'approved-once');
+    assert.equal(result.detail, undefined);
+    assert.equal(state.decisions, 1);
+  }
+  {
+    await writeFile(script, 'token = "ghp_0123456789abcdef"\n');
+    const { state, dependencies } = harness();
+    state.text = CODEX.replace('$ npm test', `$ python3 -I ${script}`);
+    dependencies.decide = () => assert.fail('must not classify a script with a credential');
+    assert.equal((await review('w8:p1', dependencies)).reason, 'sensitive-content');
+    assert.deepEqual(state.keys, []);
+  }
+});
 
 test('history records one claimed request and keeps its text out of command logs', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'permissions-record-'));
