@@ -1,8 +1,9 @@
 # Permission Approver for Herdr
 
-This plugin uses TypeSafe AI and Pi to approve one request at a time in
-Claude Code and Codex. It reads the TypeSafe API key from the macOS Keychain service
-`model-router-typesafe`. It has no package dependencies.
+A [Herdr](https://herdr.dev) plugin that approves agent permission prompts in
+Claude Code and Codex, one request at a time. It sends each request to
+[TypeSafe AI](https://typesafe.ai) (the Jev model) and, for low scores, to the
+[Pi CLI](https://pi.dev) for a second review. It has no package dependencies.
 
 The policy approves ordinary development work when its effects are clear and the
 agent can reverse them. It leaves catastrophic actions and changes that the agent
@@ -10,12 +11,28 @@ cannot reverse for a human. It never selects a permanent or session-wide grant.
 
 ## Setup
 
-Requirements: macOS, Node.js 22 or later, Herdr 0.9.3 or later, and the existing
-Keychain entry. Node and an authenticated Pi CLI must be on the Herdr server's
-PATH. The fallback uses `deepseek/deepseek-v4.1-flash-1017` with thinking off.
+Requirements:
+
+- macOS
+- Node.js 22 or later
+- Herdr 0.9.3 or later
+- A TypeSafe API key in the macOS Keychain
+- An authenticated Pi CLI. The second review uses
+  `deepseek/deepseek-v4.1-flash-1017` with thinking off.
+
+Node and Pi must be on the Herdr server's `PATH`.
+
+Store the TypeSafe API key in the Keychain service `model-router-typesafe`:
 
 ```sh
-cd /Users/sang/Developer/herdr-permissions
+security add-generic-password -U -a "$USER" -s model-router-typesafe -w
+```
+
+Then install and link the plugin:
+
+```sh
+git clone https://github.com/sagwaco/herdr-permissions.git
+cd herdr-permissions
 npm test
 herdr plugin link "$PWD"
 herdr plugin action invoke sang.permissions.check
@@ -31,8 +48,7 @@ herdr plugin enable sang.permissions
 
 The connection check sends one synthetic read-only request to TypeSafe. If the
 score is below 0.80, it also calls Pi. It does not read a pane or approve an
-agent request. Check the command log for
-`"connected":true`. Standard TypeSafe API charges apply.
+agent request. Check the command log for `"connected":true`. Standard TypeSafe API charges apply.
 
 To review prompts that were already open before activation:
 
@@ -110,7 +126,7 @@ Keys that act on the selected row:
 - `y` marks the request `should approve`, `n` marks it `should take no action`,
   and `u` clears the label.
 
-History starts when this version is installed. It records supported requests
+History starts when the plugin is installed. It records supported requests
 after the plugin claims them. Repeated polls and unrecognized dialogs do not add
 rows. Results are `approved`, `manual`, or `unknown`. An `unknown` result means
 the approval key may have been delivered but Herdr did not confirm delivery.
@@ -173,8 +189,8 @@ A label is not a permanent grant. It repeats one decision for one request, and
   This includes local dev or preview servers, copies from a temporary directory
   into a project or worktree, installing a reviewed build artifact into a local
   distribution directory or a mounted removable device when the command asserts
-  a backup and verifies the copied bytes, new Git worktrees on new local branches, read-only
-  commands such as `tail`, `ps`, `rg`, and `gh pr view`, and local test or program
+  a backup and verifies the copied bytes, new Git worktrees on new local
+  branches, read-only commands such as `tail`, `ps`, `rg`, and `gh pr view`, and local test or program
   runs such as `cargo test` and `cargo run`, also with GPU access. The same
   checks can pass in a disposable `docker run --rm` container with a local or
   project image and bind mounts of the project or a temporary directory. Scratch
@@ -224,14 +240,14 @@ it also sends that script's contents. Script contents are read only from a
 temporary directory or the agent's project directory, are included only when the
 command clearly runs them, and are bounded to 32 KiB per script and 64 KiB in
 total. A script that is larger, unreadable, or outside those directories leaves
-the request for a human. It excludes preceding conversation text and permission menu choices. The API key is
-sent only in the HTTPS authorization header. Recognizable credentials in a prompt
+the request for a human. It excludes preceding conversation text and permission
+menu choices. The API key is sent only in the HTTPS authorization header. Recognizable credentials in a prompt
 or script stop the request locally. That check cannot identify every possible
 secret format. History stores the request text but not the script contents.
 
 For scores below 0.80, the plugin also sends the request to Pi through the Pi
-CLI with `deepseek/deepseek-v4.1-flash-1017` and thinking off. It does not send the TypeSafe key or the
-Jev score to Pi. The CLI runs one print-mode session with no session file, no
+CLI with `deepseek/deepseek-v4.1-flash-1017` and thinking off. It does not send
+the TypeSafe key or the Jev score to Pi. The CLI runs one print-mode session with no session file, no
 built-in, extension, custom, or MCP tools, and no extensions, skills, prompt
 templates, or project context files. The review policy is appended to the system
 prompt, and the request is sent as untrusted data. Pi answers with a JSON
@@ -280,15 +296,14 @@ An interrupted hook leaves its current request for a human. A new agent transiti
 gets a new lock. An identical queued dialog without a state change also stays
 manual. Claim files contain hashes. History stores request text as described above.
 Command logs contain pane IDs and decision codes, not prompt text or credentials.
-The TypeSafe request has an eight-second timeout;
-Pi has a thirty-second timeout. Each Herdr request has a three-second timeout.
+The TypeSafe request has an eight-second timeout; Pi has a thirty-second timeout. Each Herdr request has a three-second timeout.
 
 A `script-unreadable` result means the command runs a local script that the
 plugin could not read inside those directories, or that is too many or too large
 to send for review. A `script-changed` result means the reviewed script no longer
 matches the file on disk, so no key was sent. Both stay with a human.
 
-An `unrecognized-or-changed-prompt` log entry now includes a `detail` field.
+An `unrecognized-or-changed-prompt` log entry includes a `detail` field.
 `prompt-format-unrecognized` means the menu did not match a supported layout.
 `pane-read-truncated` means Herdr omitted some text.
 `output-changed-during-read` means the output changed during five reads in a row.
@@ -305,8 +320,7 @@ npm run check
 Tests use synthetic permission dialogs, mock TypeSafe and Pi responses, and a
 local mock Herdr socket. They do not send input to live agents. They cover policy
 failures, Pi routing and responses, script review and script changes, hidden
-content, secrets, duplicate events,
-conversation redraws, safe retries, claim migration, queued dialogs, agent changes,
+content, secrets, duplicate events, conversation redraws, safe retries, claim migration, queued dialogs, agent changes,
 Codex pager expansion, and an uncertain send result.
 History tests cover private file modes, concurrent writes, credential hiding,
 ordering, damaged records, bounded reads, and failures after a request is claimed.
@@ -320,3 +334,7 @@ References: [Herdr plugins](https://herdr.dev/docs/plugins/),
 [Herdr socket API](https://herdr.dev/docs/socket-api/),
 [TypeSafe API](https://docs.typesafe.ai/api), and
 [Pi CLI reference](https://pi.dev/docs/latest/cli).
+
+## License
+
+[MIT](LICENSE)
