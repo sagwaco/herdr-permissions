@@ -1,4 +1,4 @@
-# Permission Approver for Herdr
+# Permission manager for Herdr
 
 A [Herdr](https://herdr.dev) plugin that reviews permission prompts from Claude
 Code and Codex and approves routine, reversible development work one request at
