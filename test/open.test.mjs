@@ -40,13 +40,13 @@ test('a closed or replaced pane opens one split pane in the caller tab', async (
   await savePane(dir, 'w1:p2');
   const { calls, run } = runner();
   assert.deepEqual(await openApprover({ stateDir: dir, run }), { opened: 'w9:p9', output: '{"result":{"plugin_pane":{"pane":{"pane_id":"w9:p9"}}}}' });
-  assert.deepEqual(calls, ['pane get w1:p2', 'plugin pane open --plugin sang.permissions --entrypoint history --placement split --direction right --focus']);
+  assert.deepEqual(calls, ['pane get w1:p2', 'plugin pane open --plugin herdr-permissions --entrypoint history --placement split --direction right --focus']);
 });
 
 test('no saved pane opens a pane and an unreadable state directory is tolerated', async (t) => {
   const { calls, run } = runner();
   assert.equal((await openApprover({ stateDir: '/nonexistent-directory', run })).opened, 'w9:p9');
-  assert.deepEqual(calls, ['plugin pane open --plugin sang.permissions --entrypoint history --placement split --direction right --focus']);
+  assert.deepEqual(calls, ['plugin pane open --plugin herdr-permissions --entrypoint history --placement split --direction right --focus']);
   const { run: broken } = runner({ output: 'not json' });
   const result = await openApprover({ stateDir: '', run: broken });
   assert.equal(result.opened, null);

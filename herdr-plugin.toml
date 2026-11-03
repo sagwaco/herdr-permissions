@@ -1,4 +1,7 @@
-id = "sang.permissions"
+# Install:  herdr plugin install sagwaco/herdr-permissions
+# Open:     herdr plugin action invoke herdr-permissions
+
+id = "herdr-permissions"
 name = "Permission Approver"
 version = "0.1.0"
 min_herdr_version = "0.9.3"
@@ -6,7 +9,7 @@ description = "Review agent requests with local filters, TypeSafe Jev, and an ag
 platforms = ["macos"]
 
 [[actions]]
-id = "history"
+id = "herdr-permissions"
 title = "Permissions: approver pane"
 contexts = ["global"]
 command = ["node", "open.mjs"]

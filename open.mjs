@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { readPane } from './panes.mjs';
 
-const PLUGIN_ID = 'sang.permissions';
+const PLUGIN_ID = 'herdr-permissions';
 const ENTRYPOINT = 'history';
 
 function herdr(args) {

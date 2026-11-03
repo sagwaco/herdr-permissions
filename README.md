@@ -33,22 +33,28 @@ or store it in the Keychain service `model-router-typesafe`:
 security add-generic-password -U -a "$USER" -s model-router-typesafe -w
 ```
 
-Then install and link the plugin:
+Then install the plugin and check the connection:
+
+```sh
+herdr plugin install sagwaco/herdr-permissions
+herdr plugin action invoke check --plugin herdr-permissions
+herdr plugin log list --plugin herdr-permissions --limit 10
+```
+
+To work on the source, link a local clone instead:
 
 ```sh
 git clone https://github.com/sagwaco/herdr-permissions.git
 cd herdr-permissions
 npm test
 herdr plugin link "$PWD"
-herdr plugin action invoke sang.permissions.check
-herdr plugin log list --plugin sang.permissions --limit 10
 ```
 
-Linking enables the event hook for new permission prompts in all local Herdr
-sessions. Add `--disabled` to link without activation. To activate a disabled link:
+Installation enables the event hook for new permission prompts in all local Herdr
+sessions. To activate a disabled plugin:
 
 ```sh
-herdr plugin enable sang.permissions
+herdr plugin enable herdr-permissions
 ```
 
 The connection check sends one synthetic read-only request through the enabled
@@ -59,24 +65,24 @@ agent request. Check the command log for `"connected":true`. Standard TypeSafe A
 To review prompts that were already open before activation:
 
 ```sh
-herdr plugin action invoke sang.permissions.review-pending
+herdr plugin action invoke review-pending --plugin herdr-permissions
 ```
 
 To stop automatic approvals:
 
 ```sh
-herdr plugin disable sang.permissions
+herdr plugin disable herdr-permissions
 ```
 
-Use `herdr plugin unlink sang.permissions` to remove the registration. Source
-files and plugin state remain on disk.
+Use `herdr plugin uninstall herdr-permissions` (or `herdr plugin unlink herdr-permissions`
+for a linked clone) to remove the registration. Plugin state remains on disk.
 
 ## Request history and approvals
 
 Open the permission interface from a shell inside Herdr:
 
 ```sh
-herdr plugin action invoke sang.permissions.history
+herdr plugin action invoke herdr-permissions
 ```
 
 The action opens the interface in a normal pane, split to the right of the
@@ -91,7 +97,7 @@ a new one. Several running interfaces share one record, so the action returns to
 the most recently started one. To open a full tab instead:
 
 ```sh
-herdr plugin pane open --plugin sang.permissions --entrypoint history --placement tab --focus
+herdr plugin pane open --plugin herdr-permissions --entrypoint history --placement tab --focus
 ```
 
 The interface records its pane in `pane.json` in the plugin state directory. The

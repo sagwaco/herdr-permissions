@@ -213,7 +213,7 @@ test('a user cannot approve a request after the automatic review sent its key', 
   const dir = await stateDir(t);
   const { state, call } = harness();
   const enabled = async (method, params) => method === 'plugin.list'
-    ? { plugins: [{ plugin_id: 'sang.permissions', enabled: true }] } : call(method, params);
+    ? { plugins: [{ plugin_id: 'herdr-permissions', enabled: true }] } : call(method, params);
   assert.equal((await autoReview(dir, enabled, { approve: true, reason: 'reversible' })).reason, 'approved-once');
   assert.equal((await approveRequest({ call, stateDir: dir, socketPath: '/socket', target: 'w1:p1' })).reason, 'already-reviewed');
   assert.equal(state.keys.length, 1);
@@ -234,7 +234,7 @@ test('an uncertain automatic delivery blocks later automatic and human sends', a
   const dir = await stateDir(t);
   const { state, call } = harness();
   const failing = async (method, params) => {
-    if (method === 'plugin.list') return { plugins: [{ plugin_id: 'sang.permissions', enabled: true }] };
+    if (method === 'plugin.list') return { plugins: [{ plugin_id: 'herdr-permissions', enabled: true }] };
     // The key arrives, but the reply is lost.
     if (method === 'agent.send_keys') { state.keys.push(params); throw new Error('socket closed'); }
     return call(method, params);

@@ -12,7 +12,7 @@ import { codexPreviewClipped, expandCodexPreview, parsePrompt } from './prompts.
 import { recordHistory } from './history.mjs';
 import { labelFor, labelIndex, precedentDecision, readFeedback } from './feedback.mjs';
 
-export const PLUGIN_ID = 'sang.permissions';
+export const PLUGIN_ID = 'herdr-permissions';
 
 export function rpc(socketPath, method, params) {
   return new Promise((resolve, reject) => {
